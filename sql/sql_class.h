@@ -4830,6 +4830,14 @@ public:
   LOG_INFO *current_linfo;
   Slave_info *slave_info;
 
+  /*
+    Indicates if this thread is suspended due to awaiting an ACK from a
+    replica. True if suspended, false otherwise.
+
+    Note that this variable is protected by Repl_semi_sync_master::LOCK_binlog
+  */
+  bool is_awaiting_semisync_ack;
+
   void set_current_linfo(LOG_INFO *linfo);
   void reset_current_linfo() { set_current_linfo(0); }
 
