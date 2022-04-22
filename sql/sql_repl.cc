@@ -1009,6 +1009,8 @@ err:
   all. Since if D is not in requested slave state, it means that slave needs
   to start at the very first GTID in domain D.
 */
+
+//这里可能是判断gitd是否存在的函数
 static bool
 contains_all_slave_gtid(slave_connection_state *st, Gtid_list_log_event *glev)
 {
