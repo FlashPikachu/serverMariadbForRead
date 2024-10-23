@@ -978,7 +978,6 @@ int maria_create(const char *name, enum data_file_type datafile_type,
   for (i=0; i < uniques ; i++)
   {
     tmp_keydef.keysegs=1;
-    tmp_keydef.flag=		HA_UNIQUE_CHECK;
     tmp_keydef.block_length=	(uint16) maria_block_size;
     tmp_keydef.keylength=	MARIA_UNIQUE_HASH_LENGTH + pointer;
     tmp_keydef.minlength=tmp_keydef.maxlength=tmp_keydef.keylength;
@@ -1065,6 +1064,8 @@ int maria_create(const char *name, enum data_file_type datafile_type,
 
   if (encrypted)
   {
+    DBUG_ASSERT(share.data_file_name.length == 0);
+    share.data_file_name.str= (char*) name;  /* For error reporting */
     if (ma_crypt_create(&share) ||
         ma_crypt_write(&share, file))
       goto err;
@@ -1461,6 +1462,7 @@ int _ma_update_state_lsns_sub(MARIA_SHARE *share, LSN lsn, TrID create_trid,
   File file= share->kfile.file;
   DBUG_ENTER("_ma_update_state_lsns_sub");
   DBUG_ASSERT(file >= 0);
+  CRASH_IF_S3_TABLE(share);
 
   if (lsn == LSN_IMPOSSIBLE)
   {

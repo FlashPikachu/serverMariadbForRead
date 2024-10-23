@@ -1,5 +1,5 @@
 /* Copyright (c) 2005, 2017, Oracle and/or its affiliates.
-   Copyright (c) 2009, 2020, 2021, MariaDB
+   Copyright (c) 2009, 2022, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -2470,7 +2470,7 @@ end:
     @retval != 0 Failure
 */
 
-static int add_key_with_algorithm(String *str, partition_info *part_info)
+static int add_key_with_algorithm(String *str, const partition_info *part_info)
 {
   int err= 0;
   err+= str->append(STRING_WITH_LEN("KEY "));
@@ -2498,6 +2498,78 @@ char *generate_partition_syntax_for_frm(THD *thd, partition_info *part_info,
                                              system_charset_info).ptr()););
   return res;
 }
+
+
+/*
+  Generate the partition type syntax from the partition data structure.
+
+  @return Operation status.
+    @retval 0    Success
+    @retval > 0  Failure
+    @retval -1   Fatal error
+*/
+
+int partition_info::gen_part_type(THD *thd, String *str) const
+{
+  int err= 0;
+  switch (part_type)
+  {
+    case RANGE_PARTITION:
+      err+= str->append(STRING_WITH_LEN("RANGE "));
+      break;
+    case LIST_PARTITION:
+      err+= str->append(STRING_WITH_LEN("LIST "));
+      break;
+    case HASH_PARTITION:
+      if (linear_hash_ind)
+        err+= str->append(STRING_WITH_LEN("LINEAR "));
+      if (list_of_part_fields)
+      {
+        err+= add_key_with_algorithm(str, this);
+        err+= add_part_field_list(thd, str, part_field_list);
+      }
+      else
+        err+= str->append(STRING_WITH_LEN("HASH "));
+      break;
+    case VERSIONING_PARTITION:
+      err+= str->append(STRING_WITH_LEN("SYSTEM_TIME "));
+      break;
+    default:
+      DBUG_ASSERT(0);
+      /* We really shouldn't get here, no use in continuing from here */
+      my_error(ER_OUT_OF_RESOURCES, MYF(ME_FATAL));
+      return -1;
+  }
+  return err;
+}
+
+
+void part_type_error(THD *thd, partition_info *work_part_info,
+                     const char *part_type,
+                     partition_info *tab_part_info)
+{
+  StringBuffer<256> tab_part_type;
+  if (tab_part_info->gen_part_type(thd, &tab_part_type) < 0)
+    return;
+  tab_part_type.length(tab_part_type.length() - 1);
+  if (work_part_info)
+  {
+    DBUG_ASSERT(!part_type);
+    StringBuffer<256> work_part_type;
+    if (work_part_info->gen_part_type(thd, &work_part_type) < 0)
+      return;
+    work_part_type.length(work_part_type.length() - 1);
+    my_error(ER_PARTITION_WRONG_TYPE, MYF(0), work_part_type.c_ptr(),
+             tab_part_type.c_ptr());
+  }
+  else
+  {
+    DBUG_ASSERT(part_type);
+    my_error(ER_PARTITION_WRONG_TYPE, MYF(0), part_type,
+             tab_part_type.c_ptr());
+  }
+}
+
 
 /*
   Generate the partition syntax from the partition data structure.
@@ -2542,34 +2614,10 @@ char *generate_partition_syntax(THD *thd, partition_info *part_info,
   DBUG_ENTER("generate_partition_syntax");
 
   err+= str.append(STRING_WITH_LEN(" PARTITION BY "));
-  switch (part_info->part_type)
-  {
-    case RANGE_PARTITION:
-      err+= str.append(STRING_WITH_LEN("RANGE "));
-      break;
-    case LIST_PARTITION:
-      err+= str.append(STRING_WITH_LEN("LIST "));
-      break;
-    case HASH_PARTITION:
-      if (part_info->linear_hash_ind)
-        err+= str.append(STRING_WITH_LEN("LINEAR "));
-      if (part_info->list_of_part_fields)
-      {
-        err+= add_key_with_algorithm(&str, part_info);
-        err+= add_part_field_list(thd, &str, part_info->part_field_list);
-      }
-      else
-        err+= str.append(STRING_WITH_LEN("HASH "));
-      break;
-    case VERSIONING_PARTITION:
-      err+= str.append(STRING_WITH_LEN("SYSTEM_TIME "));
-      break;
-    default:
-      DBUG_ASSERT(0);
-      /* We really shouldn't get here, no use in continuing from here */
-      my_error(ER_OUT_OF_RESOURCES, MYF(ME_FATAL));
-      DBUG_RETURN(NULL);
-  }
+  int err2= part_info->gen_part_type(thd, &str);
+  if (err2 < 0)
+    DBUG_RETURN(NULL);
+  err+= err2;
   if (part_info->part_type == VERSIONING_PARTITION)
   {
     Vers_part_info *vers_info= part_info->vers_info;
@@ -2595,10 +2643,16 @@ char *generate_partition_syntax(THD *thd, partition_info *part_info,
         err+= str.append('\'');
       }
     }
-    if (vers_info->limit)
+    else if (vers_info->limit)
     {
       err+= str.append(STRING_WITH_LEN("LIMIT "));
       err+= str.append_ulonglong(vers_info->limit);
+    }
+    if (vers_info->auto_hist)
+    {
+      DBUG_ASSERT(vers_info->interval.is_set() ||
+                  vers_info->limit);
+      err+= str.append(STRING_WITH_LEN(" AUTO"));
     }
   }
   else if (part_info->part_expr)
@@ -4810,6 +4864,7 @@ static void check_datadir_altered_for_innodb(THD *thd,
   @param[out] partition_changed  Boolean indicating whether partition changed
   @param[out] fast_alter_table   Boolean indicating if fast partition alter is
                                  possible.
+  @param[out] thd->work_part_info Prepared part_info for the new table
 
   @return Operation status
     @retval TRUE                 Error
@@ -5026,6 +5081,13 @@ uint prep_alter_part_table(THD *thd, TABLE *table, Alter_info *alter_info,
     if ((alter_info->partition_flags & ALTER_PARTITION_ADD) ||
         (alter_info->partition_flags & ALTER_PARTITION_REORGANIZE))
     {
+      if ((alter_info->partition_flags & ALTER_PARTITION_CONVERT_IN) &&
+          !(tab_part_info->part_type == RANGE_PARTITION ||
+            tab_part_info->part_type == LIST_PARTITION))
+      {
+        my_error(ER_ONLY_ON_RANGE_LIST_PARTITION, MYF(0), "CONVERT TABLE TO");
+        goto err;
+      }
       if (thd->work_part_info->part_type != tab_part_info->part_type)
       {
         if (thd->work_part_info->part_type == NOT_A_PARTITION)
@@ -5058,10 +5120,14 @@ uint prep_alter_part_table(THD *thd, TABLE *table, Alter_info *alter_info,
             my_error(ER_PARTITION_WRONG_VALUES_ERROR, MYF(0),
                      "LIST", "IN");
           }
+          /*
+            Adding history partitions to non-history partitioning or
+            non-history parittions to history partitioning is prohibited.
+          */
           else if (thd->work_part_info->part_type == VERSIONING_PARTITION ||
                    tab_part_info->part_type == VERSIONING_PARTITION)
           {
-            my_error(ER_PARTITION_WRONG_TYPE, MYF(0), "SYSTEM_TIME");
+            part_type_error(thd, thd->work_part_info, NULL, tab_part_info);
           }
           else
           {
@@ -5095,13 +5161,6 @@ uint prep_alter_part_table(THD *thd, TABLE *table, Alter_info *alter_info,
     }
     if (alter_info->partition_flags & ALTER_PARTITION_ADD)
     {
-      if ((alter_info->partition_flags & ALTER_PARTITION_CONVERT_IN) &&
-          !(tab_part_info->part_type == RANGE_PARTITION ||
-            tab_part_info->part_type == LIST_PARTITION))
-      {
-        my_error(ER_ONLY_ON_RANGE_LIST_PARTITION, MYF(0), "CONVERT TABLE TO");
-        goto err;
-      }
       if (*fast_alter_table && thd->locked_tables_mode)
       {
         MEM_ROOT *old_root= thd->mem_root;
@@ -5340,11 +5399,14 @@ that are reorganised.
           {
             if (el->type == partition_element::CURRENT)
             {
+              /* now_part is always last partition, we add it to the end of partitions list. */
               it.remove();
               now_part= el;
             }
           }
-          if (*fast_alter_table && tab_part_info->vers_info->interval.is_set())
+          if (*fast_alter_table &&
+              !(alter_info->partition_flags & ALTER_PARTITION_AUTO_HIST) &&
+              tab_part_info->vers_info->interval.is_set())
           {
             partition_element *hist_part= tab_part_info->vers_info->hist_part;
             if (hist_part->range_value <= thd->query_start())
@@ -5967,11 +6029,33 @@ the generated partition syntax in a correct manner.
     {
       partition_info *part_info= thd->work_part_info;
       bool is_native_partitioned= FALSE;
+      if (tab_part_info && tab_part_info->part_type == VERSIONING_PARTITION &&
+          tab_part_info != part_info && part_info->part_type == VERSIONING_PARTITION &&
+          part_info->num_parts == 0)
+      {
+        if (part_info->vers_info->interval.is_set() && (
+            !tab_part_info->vers_info->interval.is_set() ||
+            part_info->vers_info->interval == tab_part_info->vers_info->interval))
+        {
+          /* If interval is changed we can not do fast alter */
+          tab_part_info= tab_part_info->get_clone(thd);
+        }
+        else
+        {
+          /* NOTE: fast_alter_partition_table() works on existing TABLE data. */
+          *fast_alter_table= true;
+          table->mark_table_for_reopen();
+        }
+        *tab_part_info->vers_info= *part_info->vers_info;
+        thd->work_part_info= part_info= tab_part_info;
+        *partition_changed= true;
+      }
+
       /*
         Need to cater for engine types that can handle partition without
         using the partition handler.
       */
-      if (part_info != tab_part_info)
+      else if (part_info != tab_part_info)
       {
         if (part_info->fix_parser_data(thd))
         {
@@ -6056,7 +6140,7 @@ err:
                                records are added
 */
 
-static bool mysql_change_partitions(ALTER_PARTITION_PARAM_TYPE *lpt)
+static bool mysql_change_partitions(ALTER_PARTITION_PARAM_TYPE *lpt, bool copy_data)
 {
   char path[FN_REFLEN+1];
   int error;
@@ -6064,9 +6148,10 @@ static bool mysql_change_partitions(ALTER_PARTITION_PARAM_TYPE *lpt)
   THD *thd= lpt->thd;
   DBUG_ENTER("mysql_change_partitions");
 
-  build_table_filename(path, sizeof(path) - 1, lpt->db.str, lpt->table_name.str, "", 0);
+  build_table_filename(path, sizeof(path) - 1, lpt->alter_info->db.str,
+                       lpt->alter_info->table_name.str, "", 0);
 
-  if(mysql_trans_prepare_alter_copy_data(thd))
+  if(copy_data && mysql_trans_prepare_alter_copy_data(thd))
     DBUG_RETURN(TRUE);
 
   /* TODO: test if bulk_insert would increase the performance */
@@ -6080,7 +6165,9 @@ static bool mysql_change_partitions(ALTER_PARTITION_PARAM_TYPE *lpt)
     file->print_error(error, MYF(error != ER_OUTOFMEMORY ? 0 : ME_FATAL));
   }
 
-  if (mysql_trans_commit_alter_copy_data(thd))
+  DBUG_ASSERT(copy_data || (!lpt->copied && !lpt->deleted));
+
+  if (copy_data && mysql_trans_commit_alter_copy_data(thd))
     error= 1;                                /* The error has been reported */
 
   DBUG_RETURN(MY_TEST(error));
@@ -6112,7 +6199,8 @@ static bool mysql_rename_partitions(ALTER_PARTITION_PARAM_TYPE *lpt)
   int error;
   DBUG_ENTER("mysql_rename_partitions");
 
-  build_table_filename(path, sizeof(path) - 1, lpt->db.str, lpt->table_name.str, "", 0);
+  build_table_filename(path, sizeof(path) - 1, lpt->alter_info->db.str,
+                       lpt->alter_info->table_name.str, "", 0);
   if (unlikely((error= lpt->table->file->ha_rename_partitions(path))))
   {
     if (error != 1)
@@ -6156,7 +6244,8 @@ static bool mysql_drop_partitions(ALTER_PARTITION_PARAM_TYPE *lpt)
                                                 lpt->table->s->table_name.str,
                                                 MDL_EXCLUSIVE));
 
-  build_table_filename(path, sizeof(path) - 1, lpt->db.str, lpt->table_name.str, "", 0);
+  build_table_filename(path, sizeof(path) - 1, lpt->alter_info->db.str,
+                       lpt->alter_info->table_name.str, "", 0);
   if ((error= lpt->table->file->ha_drop_partitions(path)))
   {
     lpt->table->file->print_error(error, MYF(0));
@@ -6647,7 +6736,8 @@ static bool write_log_rename_frm(ALTER_PARTITION_PARAM_TYPE *lpt)
   DBUG_ENTER("write_log_rename_frm");
 
   part_info->list= NULL;
-  build_table_filename(path, sizeof(path) - 1, lpt->db.str, lpt->table_name.str, "", 0);
+  build_table_filename(path, sizeof(path) - 1, lpt->alter_info->db.str,
+                       lpt->alter_info->table_name.str, "", 0);
   build_table_shadow_filename(shadow_path, sizeof(shadow_path) - 1, lpt);
   mysql_mutex_lock(&LOCK_gdl);
   if (write_log_replace_frm(lpt, 0UL, shadow_path, path))
@@ -6698,7 +6788,8 @@ static bool write_log_drop_partition(ALTER_PARTITION_PARAM_TYPE *lpt)
   DBUG_ENTER("write_log_drop_partition");
 
   part_info->list= NULL;
-  build_table_filename(path, sizeof(path) - 1, lpt->db.str, lpt->table_name.str, "", 0);
+  build_table_filename(path, sizeof(path) - 1, lpt->alter_info->db.str,
+                       lpt->alter_info->table_name.str, "", 0);
   build_table_shadow_filename(tmp_path, sizeof(tmp_path) - 1, lpt);
   mysql_mutex_lock(&LOCK_gdl);
   if (write_log_dropped_partitions(lpt, &next_entry, (const char*)path,
@@ -6733,7 +6824,9 @@ static bool write_log_convert_partition(ALTER_PARTITION_PARAM_TYPE *lpt)
   char path[FN_REFLEN + 1];
   uint next_entry= part_info->list ? part_info->list->entry_pos : 0;
 
-  build_table_filename(path, sizeof(path) - 1, lpt->db.str, lpt->table_name.str, "", 0);
+  build_table_filename(path, sizeof(path) - 1,
+                       lpt->alter_info->db.str,
+                       lpt->alter_info->table_name.str, "", 0);
   build_table_shadow_filename(tmp_path, sizeof(tmp_path) - 1, lpt);
 
   mysql_mutex_lock(&LOCK_gdl);
@@ -6784,7 +6877,8 @@ static bool write_log_add_change_partition(ALTER_PARTITION_PARAM_TYPE *lpt)
   DBUG_ASSERT(old_first_log_entry);
   DBUG_ENTER("write_log_add_change_partition");
 
-  build_table_filename(path, sizeof(path) - 1, lpt->db.str, lpt->table_name.str, "", 0);
+  build_table_filename(path, sizeof(path) - 1, lpt->alter_info->db.str,
+                       lpt->alter_info->table_name.str, "", 0);
   build_table_shadow_filename(tmp_path, sizeof(tmp_path) - 1, lpt);
   mysql_mutex_lock(&LOCK_gdl);
 
@@ -6849,7 +6943,8 @@ static bool write_log_final_change_partition(ALTER_PARTITION_PARAM_TYPE *lpt)
     Replace the revert operations with forced retry operations.
   */
   part_info->list= NULL;
-  build_table_filename(path, sizeof(path) - 1, lpt->db.str, lpt->table_name.str, "", 0);
+  build_table_filename(path, sizeof(path) - 1, lpt->alter_info->db.str,
+                       lpt->alter_info->table_name.str, "", 0);
   build_table_shadow_filename(shadow_path, sizeof(shadow_path) - 1, lpt);
   mysql_mutex_lock(&LOCK_gdl);
   if (write_log_changed_partitions(lpt, &next_entry, (const char*)path))
@@ -6987,16 +7082,33 @@ static bool alter_partition_lock_handling(ALTER_PARTITION_PARAM_TYPE *lpt)
 
 static int alter_close_table(ALTER_PARTITION_PARAM_TYPE *lpt)
 {
-  int error= 0;
+  THD *thd= lpt->thd;
+  TABLE_SHARE *share= lpt->table->s;
   DBUG_ENTER("alter_close_table");
 
-  if (lpt->table->db_stat)
-  {
-    error= mysql_lock_remove(lpt->thd, lpt->thd->lock, lpt->table);
-    error= lpt->table->file->ha_close();
-    lpt->table->db_stat= 0;                        // Mark file closed
-  }
-  DBUG_RETURN(error);
+  TABLE *table= thd->open_tables;
+  do {
+    table= find_locked_table(table, share->db.str, share->table_name.str);
+    if (!table)
+    {
+      DBUG_RETURN(0);
+    }
+
+    if (table->db_stat)
+    {
+      if (int error= mysql_lock_remove(thd, thd->lock, table))
+      {
+        DBUG_RETURN(error);
+      }
+      if (int error= table->file->ha_close())
+      {
+        DBUG_RETURN(error);
+      }
+      table->db_stat= 0; // Mark file closed
+    }
+  } while ((table= table->next));
+
+  DBUG_RETURN(0);
 }
 
 
@@ -7031,8 +7143,8 @@ static void handle_alter_part_error(ALTER_PARTITION_PARAM_TYPE *lpt,
     Better to do that here, than leave the cleaning up to others.
     Acquire EXCLUSIVE mdl lock if not already acquired.
   */
-  if (!thd->mdl_context.is_lock_owner(MDL_key::TABLE, lpt->db.str,
-                                      lpt->table_name.str,
+  if (!thd->mdl_context.is_lock_owner(MDL_key::TABLE, lpt->alter_info->db.str,
+                                      lpt->alter_info->table_name.str,
                                       MDL_EXCLUSIVE) &&
       wait_while_table_is_used(thd, table, HA_EXTRA_FORCE_REOPEN))
   {
@@ -7215,13 +7327,13 @@ bool log_partition_alter_to_ddl_log(ALTER_PARTITION_PARAM_TYPE *lpt)
   ddl_log.query=                   { C_STRING_WITH_LEN("ALTER") };
   ddl_log.org_storage_engine_name= old_engine_lex;
   ddl_log.org_partitioned=         true;
-  ddl_log.org_database=            lpt->db;
-  ddl_log.org_table=               lpt->table_name;
+  ddl_log.org_database=            lpt->alter_info->db;
+  ddl_log.org_table=               lpt->alter_info->table_name;
   ddl_log.org_table_id=            lpt->org_tabledef_version;
   ddl_log.new_storage_engine_name= old_engine_lex;
   ddl_log.new_partitioned=         true;
-  ddl_log.new_database=            lpt->db;
-  ddl_log.new_table=               lpt->table_name;
+  ddl_log.new_database=            lpt->alter_info->db;
+  ddl_log.new_table=               lpt->alter_info->table_name;
   ddl_log.new_table_id=            lpt->create_info->tabledef_version;
   backup_log_ddl(&ddl_log);        // This sets backup_log_error on failure
   return 0;
@@ -7329,8 +7441,7 @@ uint fast_alter_partition_table(THD *thd, TABLE *table,
 
   /* Set-up struct used to write frm files */
   partition_info *part_info;
-  ALTER_PARTITION_PARAM_TYPE lpt_obj;
-  ALTER_PARTITION_PARAM_TYPE *lpt= &lpt_obj;
+  ALTER_PARTITION_PARAM_TYPE lpt_obj, *lpt= &lpt_obj;
   bool action_completed= FALSE;
   bool frm_install= FALSE;
   MDL_ticket *mdl_ticket= table->mdl_ticket;
@@ -7350,8 +7461,6 @@ uint fast_alter_partition_table(THD *thd, TABLE *table,
   lpt->table= table;
   lpt->key_info_buffer= 0;
   lpt->key_count= 0;
-  lpt->db= alter_ctx->db;
-  lpt->table_name= alter_ctx->table_name;
   lpt->org_tabledef_version= table->s->tabledef_version;
   lpt->copied= 0;
   lpt->deleted= 0;
@@ -7363,7 +7472,8 @@ uint fast_alter_partition_table(THD *thd, TABLE *table,
     thd->variables.option_bits|= OPTION_IF_EXISTS;
 
   if (table->file->alter_table_flags(alter_info->flags) &
-        HA_PARTITION_ONE_PHASE)
+        HA_PARTITION_ONE_PHASE &&
+      !(alter_info->partition_flags & ALTER_PARTITION_AUTO_HIST))
   {
     /*
       In the case where the engine supports one phase online partition
@@ -7405,7 +7515,7 @@ uint fast_alter_partition_table(THD *thd, TABLE *table,
       2) Perform the change within the handler
     */
     if (mysql_write_frm(lpt, WFRM_WRITE_SHADOW) ||
-        mysql_change_partitions(lpt))
+        mysql_change_partitions(lpt, true))
     {
       goto err;
     }
@@ -7598,9 +7708,14 @@ uint fast_alter_partition_table(THD *thd, TABLE *table,
         ERROR_INJECT("convert_partition_11"))
       goto err;
   }
+  /*
+    TODO: would be good if adding new empty VERSIONING partitions would always
+    go this way, auto or not.
+  */
   else if ((alter_info->partition_flags & ALTER_PARTITION_ADD) &&
            (part_info->part_type == RANGE_PARTITION ||
-            part_info->part_type == LIST_PARTITION))
+            part_info->part_type == LIST_PARTITION ||
+            alter_info->partition_flags & ALTER_PARTITION_AUTO_HIST))
   {
     DBUG_ASSERT(!(alter_info->partition_flags & ALTER_PARTITION_CONVERT_IN));
     /*
@@ -7641,7 +7756,7 @@ uint fast_alter_partition_table(THD *thd, TABLE *table,
         ERROR_INJECT("add_partition_3") ||
         write_log_add_change_partition(lpt) ||
         ERROR_INJECT("add_partition_4") ||
-        mysql_change_partitions(lpt) ||
+        mysql_change_partitions(lpt, false) ||
         ERROR_INJECT("add_partition_5") ||
         alter_close_table(lpt) ||
         ERROR_INJECT("add_partition_6") ||
@@ -7728,7 +7843,7 @@ uint fast_alter_partition_table(THD *thd, TABLE *table,
         ERROR_INJECT("change_partition_2") ||
         write_log_add_change_partition(lpt) ||
         ERROR_INJECT("change_partition_3") ||
-        mysql_change_partitions(lpt) ||
+        mysql_change_partitions(lpt, true) ||
         ERROR_INJECT("change_partition_4") ||
         wait_while_table_is_used(thd, table, HA_EXTRA_NOT_USED) ||
         ERROR_INJECT("change_partition_5") ||

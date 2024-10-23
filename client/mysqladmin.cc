@@ -15,7 +15,7 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1335  USA */
 
-/* maintaince of mysql databases */
+/* maintenance of mysql databases */
 
 #include "client_priv.h"
 #include <signal.h>
@@ -53,8 +53,6 @@ static bool sql_log_bin_off= false;
 
 static uint opt_protocol=0;
 static myf error_flags; /* flags to pass to my_printf_error, like ME_BELL */
-
-static uint protocol_to_force= MYSQL_PROTOCOL_DEFAULT;
 
 /*
   When using extended-status relatively, ex_val_max_len is the estimated
@@ -243,12 +241,9 @@ static const char *load_default_groups[]=
   0 };
 
 my_bool
-get_one_option(const struct my_option *opt, const char *argument, const char *filename)
+get_one_option(const struct my_option *opt, const char *argument,
+               const char *filename)
 {
-
-  /* Track when protocol is set via CLI to not force overrides */
-  static my_bool ignore_protocol_override = FALSE;
-
   switch(opt->id) {
   case 'c':
     opt_count_iterations= 1;
@@ -280,13 +275,6 @@ get_one_option(const struct my_option *opt, const char *argument, const char *fi
   case 'W':
 #ifdef _WIN32
     opt_protocol = MYSQL_PROTOCOL_PIPE;
-
-    /* Prioritize pipe if explicit via command line */
-    if (filename[0] == '\0')
-    {
-      ignore_protocol_override = TRUE;
-      protocol_to_force = MYSQL_PROTOCOL_DEFAULT;
-    }
 #endif
     break;
   case '#':
@@ -322,45 +310,26 @@ get_one_option(const struct my_option *opt, const char *argument, const char *fi
       sf_leaking_memory= 1; /* no memory leak reports here */
       exit(1);
     }
-
-    /* Specification of protocol via CLI trumps implicit overrides */
-    if (filename[0] == '\0')
-    {
-      ignore_protocol_override = TRUE;
-      protocol_to_force = MYSQL_PROTOCOL_DEFAULT;
-    }
-
     break;
   case 'P':
-    /* If port and socket are set, fall back to default behavior */
-    if (protocol_to_force == SOCKET_PROTOCOL_TO_FORCE)
+    if (filename[0] == '\0')
     {
-      ignore_protocol_override = TRUE;
-      protocol_to_force = MYSQL_PROTOCOL_DEFAULT;
-    }
-
-    /* If port is set via CLI, try to force protocol to TCP */
-    if (filename[0] == '\0' &&
-        !ignore_protocol_override &&
-        protocol_to_force == MYSQL_PROTOCOL_DEFAULT)
-    {
-      protocol_to_force = MYSQL_PROTOCOL_TCP;
+      /* Port given on command line, switch protocol to use TCP */
+      opt_protocol= MYSQL_PROTOCOL_TCP;
     }
     break;
   case 'S':
-    /* If port and socket are set, fall back to default behavior */
-    if (protocol_to_force == MYSQL_PROTOCOL_TCP)
+    if (filename[0] == '\0')
     {
-      ignore_protocol_override = TRUE;
-      protocol_to_force = MYSQL_PROTOCOL_DEFAULT;
-    }
-
-    /* Prioritize socket if set via command line */
-    if (filename[0] == '\0' &&
-        !ignore_protocol_override &&
-        protocol_to_force == MYSQL_PROTOCOL_DEFAULT)
-    {
-      protocol_to_force = SOCKET_PROTOCOL_TO_FORCE;
+      /*
+        Socket given on command line, switch protocol to use SOCKETSt
+        Except on Windows if 'protocol= pipe' has been provided in
+        the config file or command line.
+      */
+      if (opt_protocol != MYSQL_PROTOCOL_PIPE)
+      {
+        opt_protocol= MYSQL_PROTOCOL_SOCKET;
+      }
     }
     break;
   }
@@ -388,13 +357,6 @@ int main(int argc,char *argv[])
   temp_argv= mask_password(argc, &argv);
   temp_argc= argc;
 
-  /* Command line options override configured protocol */
-  if (protocol_to_force > MYSQL_PROTOCOL_DEFAULT
-      && protocol_to_force != opt_protocol)
-  {
-    warn_protocol_override(host, &opt_protocol, protocol_to_force);
-  }
-
   if (debug_info_flag)
     my_end_arg= MY_CHECK_ERROR | MY_GIVE_INFO;
   if (debug_check_flag)
@@ -407,7 +369,7 @@ int main(int argc,char *argv[])
   }
   commands = temp_argv;
   if (tty_password)
-    opt_password = get_tty_password(NullS);
+    opt_password = my_get_tty_password(NullS);
 
   (void) signal(SIGINT,endprog);			/* Here if abort */
   (void) signal(SIGTERM,endprog);		/* Here if abort */
@@ -1138,8 +1100,8 @@ static int execute_commands(MYSQL *mysql,int argc, char **argv)
       else if (argc == 1)
       {
         /* prompt for password */
-        typed_password= get_tty_password("New password: ");
-        verified= get_tty_password("Confirm new password: ");
+        typed_password= my_get_tty_password("New password: ");
+        verified= my_get_tty_password("Confirm new password: ");
         if (strcmp(typed_password, verified) != 0)
         {
           my_printf_error(0,"Passwords don't match",MYF(ME_BELL));
@@ -1600,7 +1562,8 @@ static void print_relative_row_vert(MYSQL_RES *result __attribute__((unused)),
 	 llstr((tmp - last_values[row]), buff));
 
   /* Find the minimum row length needed to output the relative value */
-  if ((length=(uint) strlen(buff) > ex_val_max_len[row]) && ex_status_printed)
+  length=(uint) strlen(buff);
+  if (length > ex_val_max_len[row] && ex_status_printed)
     ex_val_max_len[row] = length;
   last_values[row] = tmp;
 }

@@ -199,9 +199,22 @@ extern ulonglong strtoull(const char *str, char **ptr, int base);
 
 #include <mysql/plugin.h>
 
-#define STRING_WITH_LEN(X) (X), ((size_t) (sizeof(X) - 1))
-#define USTRING_WITH_LEN(X) ((uchar*) X), ((size_t) (sizeof(X) - 1))
-#define C_STRING_WITH_LEN(X) ((char *) (X)), ((size_t) (sizeof(X) - 1))
+#ifdef __cplusplus
+#include <type_traits>
+template<typename T> inline constexpr const char *_swl_check(T s)
+{
+  static_assert(std::is_same<T, const char (&)[sizeof(T)]>::value
+             || std::is_same<T, const char [sizeof(T)]>::value,
+             "Wrong argument for STRING_WITH_LEN()");
+  return s;
+}
+#define STRING_WITH_LEN(X) _swl_check<decltype(X)>(X), ((size_t) (sizeof(X) - 1))
+#else
+#define STRING_WITH_LEN(X) (X ""), ((size_t) (sizeof(X) - 1))
+#endif
+
+#define USTRING_WITH_LEN(X) (uchar*) STRING_WITH_LEN(X)
+#define C_STRING_WITH_LEN(X) (char *) STRING_WITH_LEN(X)
 #define LEX_STRING_WITH_LEN(X) (X).str, (X).length
 
 typedef struct st_mysql_const_lex_string LEX_CSTRING;
@@ -224,6 +237,64 @@ static inline void lex_string_set3(LEX_CSTRING *lex_str, const char *c_str,
 {
   lex_str->str= c_str;
   lex_str->length= len;
+}
+
+/*
+  Copies src into dst and ensures dst is a NULL terminated C string.
+
+  Returns 1 if the src string was truncated due to too small size of dst.
+  Returns 0 if src completely fit within dst. Pads the remaining dst with '\0'
+
+  Note: dst_size must be > 0
+*/
+static inline int safe_strcpy(char *dst, size_t dst_size, const char *src)
+{
+  DBUG_ASSERT(dst_size > 0);
+
+  /* 1) IF there is a 0 byte in the first dst_size bytes of src, strncpy will
+   *    0-terminate dst, and pad dst with additional 0 bytes out to dst_size.
+   *
+   * 2) IF there is no 0 byte in the first dst_size bytes of src, strncpy will
+   *    copy dst_size bytes, and the final byte won't be 0.
+   *
+   * In GCC 8+, the `-Wstringop-truncation` warning will object to strncpy()
+   * being used in this way, so we need to disable this warning for this
+   * single statement.
+   */
+
+#if defined(__GNUC__) && __GNUC__ >= 8
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wstringop-truncation"
+#endif
+  strncpy(dst, src, dst_size);
+#if defined(__GNUC__) && __GNUC__ >= 8
+#pragma GCC diagnostic pop
+#endif
+
+  if (dst[dst_size-1])
+  {
+    /* Only possible in case (2), meaning src was truncated. */
+    dst[dst_size-1]= 0;
+    return 1;
+  }
+  return 0;
+}
+
+/*
+  Appends src to dst and ensures dst is a NULL terminated C string.
+
+  Returns 1 if the src string was truncated due to too small size of dst.
+  Returns 0 if src completely fit within the remaining dst space. Pads the
+            remaining dst with '\0'.
+
+  Note: dst_size must be > 0
+*/
+static inline int safe_strcat(char *dst, size_t dst_size, const char *src)
+{
+  size_t init_len= strlen(dst);
+  if (init_len >= dst_size - 1)
+    return 1;
+  return safe_strcpy(dst + init_len, dst_size - init_len, src);
 }
 
 #ifdef __cplusplus

@@ -16,6 +16,7 @@ set -e
 # Buildbot, running the test suite from installed .debs on a clean VM.
 export DEB_BUILD_OPTIONS="nocheck $DEB_BUILD_OPTIONS"
 
+# shellcheck source=/dev/null
 source ./VERSION
 
 # General CI optimizations to keep build output smaller
@@ -26,16 +27,16 @@ then
   sed '/Add support for verbose builds/,/^$/d' -i debian/rules
 elif [ -d storage/columnstore/columnstore/debian ]
 then
-  # ColumnStore is explicitly disabled in the native Debian build, so allow it
+  # ColumnStore is explicitly disabled in the native Debian build. Enable it
   # now when build is triggered by autobake-deb.sh (MariaDB.org) and when the
-  # build is not running on Travis or Gitlab-CI
+  # build is not running on Gitlab-CI.
   sed '/-DPLUGIN_COLUMNSTORE=NO/d' -i debian/rules
   # Take the files and part of control from MCS directory
   if [ ! -f debian/mariadb-plugin-columnstore.install ]
   then
     cp -v storage/columnstore/columnstore/debian/mariadb-plugin-columnstore.* debian/
     echo >> debian/control
-    sed "s/10.6/${MYSQL_VERSION_MAJOR}.${MYSQL_VERSION_MINOR}/" <storage/columnstore/columnstore/debian/control >> debian/control
+    sed "s/-10.6//" <storage/columnstore/columnstore/debian/control >> debian/control
   fi
 fi
 
@@ -58,14 +59,14 @@ remove_rocksdb_tools()
 replace_uring_with_aio()
 {
   sed 's/liburing-dev/libaio-dev/g' -i debian/control
-  sed -e '/-DIGNORE_AIO_CHECK=YES/d' \
-      -e '/-DWITH_URING=yes/d' -i debian/rules
+  sed -e '/-DIGNORE_AIO_CHECK=ON/d' \
+      -e '/-DWITH_URING=ON/d' -i debian/rules
 }
 
 disable_pmem()
 {
   sed '/libpmem-dev/d' -i debian/control
-  sed '/-DWITH_PMEM=yes/d' -i debian/rules
+  sed '/-DWITH_PMEM=ON/d' -i debian/rules
 }
 
 disable_libfmt()
@@ -76,16 +77,35 @@ disable_libfmt()
 
 architecture=$(dpkg-architecture -q DEB_BUILD_ARCH)
 
-CODENAME="$(lsb_release -sc)"
-case "${CODENAME}" in
-  stretch)
-    # MDEV-16525 libzstd-dev-1.1.3 minimum version
-    sed -e '/libzstd-dev/d' \
-        -e 's/libcurl4/libcurl3/g' -i debian/control
-    remove_rocksdb_tools
-    disable_pmem
-    ;&
-  buster)
+# Parse release name and number from Linux standard base release
+# Example:
+#   $ lsb_release -a
+#   No LSB modules are available.
+#   Distributor ID:	Debian
+#   Description:	Debian GNU/Linux bookworm/sid
+#   Release:	n/a
+#   Codename:	n/a
+LSBID="$(lsb_release -si  | tr '[:upper:]' '[:lower:]')"
+LSBVERSION="$(lsb_release -sr | sed -e "s#\.##g")"
+LSBNAME="$(lsb_release -sc)"
+
+# If 'n/a', assume 'sid'
+if [ "${LSBVERSION}" == "n/a" ] || [ "${LSBNAME}" == "n/a" ]
+then
+  LSBVERSION="sid"
+  LSBNAME="sid"
+fi
+
+# If not known, use 'unknown' in .deb version identifier
+if [ -z "${LSBID}" ]
+then
+  LSBID="unknown"
+fi
+
+case "${LSBNAME}"
+in
+  # Debian
+  "buster")
     disable_libfmt
     replace_uring_with_aio
     if [ ! "$architecture" = amd64 ]
@@ -93,7 +113,7 @@ case "${CODENAME}" in
       disable_pmem
     fi
     ;&
-  bullseye|bookworm)
+  "bullseye"|"bookworm")
     # mariadb-plugin-rocksdb in control is 4 arches covered by the distro rocksdb-tools
     # so no removal is necessary.
     if [[ ! "$architecture" =~ amd64|arm64|ppc64el ]]
@@ -105,20 +125,20 @@ case "${CODENAME}" in
       replace_uring_with_aio
     fi
     ;&
-  sid)
-    # should always be empty here.
-    # need to match here to avoid the default Error however
+  "sid")
+    # The default packaging should always target Debian Sid, so in this case
+    # there is intentionally no customizations whatsoever.
     ;;
-    # UBUNTU
-  bionic)
+  # Ubuntu
+  "bionic")
     remove_rocksdb_tools
     [ "$architecture" != amd64 ] && disable_pmem
     ;&
-  focal)
+  "focal")
     replace_uring_with_aio
     disable_libfmt
     ;&
-  impish|jammy)
+  "impish"|"jammy"|"kinetic")
     # mariadb-plugin-rocksdb s390x not supported by us (yet)
     # ubuntu doesn't support mips64el yet, so keep this just
     # in case something changes.
@@ -136,7 +156,7 @@ case "${CODENAME}" in
     fi
     ;;
   *)
-    echo "Error - unknown release codename $CODENAME" >&2
+    echo "Error: Unknown release '$LSBNAME'" >&2
     exit 1
 esac
 
@@ -153,23 +173,45 @@ UPSTREAM="${MYSQL_VERSION_MAJOR}.${MYSQL_VERSION_MINOR}.${MYSQL_VERSION_PATCH}${
 PATCHLEVEL="+maria"
 LOGSTRING="MariaDB build"
 EPOCH="1:"
-VERSION="${EPOCH}${UPSTREAM}${PATCHLEVEL}~${CODENAME}"
+VERSION="${EPOCH}${UPSTREAM}${PATCHLEVEL}~${LSBID:0:3}${LSBVERSION}"
 
-dch -b -D "${CODENAME}" -v "${VERSION}" "Automatic build with ${LOGSTRING}." --controlmaint
+dch -b -D "${LSBNAME}" -v "${VERSION}" "Automatic build with ${LOGSTRING}." --controlmaint
 
 echo "Creating package version ${VERSION} ... "
+
+BUILDPACKAGE_DPKGCMD=()
+
+# Fakeroot test
+if fakeroot true; then
+  BUILDPACKAGE_DPKGCMD+=( "fakeroot" "--" )
+fi
 
 # Use eatmydata is available to build faster with less I/O, skipping fsync()
 # during the entire build process (safe because a build can always be restarted)
 if which eatmydata > /dev/null
 then
-  BUILDPACKAGE_PREPEND=eatmydata
+  BUILDPACKAGE_DPKGCMD+=("eatmydata")
+fi
+
+BUILDPACKAGE_DPKGCMD+=("dpkg-buildpackage")
+
+# Using dpkg-buildpackage args
+# -us Allow unsigned sources
+# -uc Allow unsigned changes
+# -I  Tar ignore
+BUILDPACKAGE_DPKGCMD+=(-us -uc -I)
+
+# There can be also extra flags that are appended to args
+if [ -n "$BUILDPACKAGE_FLAGS" ]
+then
+  read -ra BUILDPACKAGE_TMP_ARGS <<< "$BUILDPACKAGE_FLAGS"
+  BUILDPACKAGE_DPKGCMD+=( "${BUILDPACKAGE_TMP_ARGS[@]}" )
 fi
 
 # Build the package
 # Pass -I so that .git and other unnecessary temporary and source control files
 # will be ignored by dpkg-source when creating the tar.gz source package.
-fakeroot $BUILDPACKAGE_PREPEND dpkg-buildpackage -us -uc -I $BUILDPACKAGE_FLAGS
+"${BUILDPACKAGE_DPKGCMD[@]}"
 
 # If the step above fails due to missing dependencies, you can manually run
 #   sudo mk-build-deps debian/control -r -i
@@ -182,7 +224,11 @@ then
   for package in *.deb
   do
     echo "$package" | cut -d '_' -f 1
-    dpkg-deb -c "$package" | awk '{print $1 " " $2 " " $6 " " $7 " " $8}' | sort -k 3
+    # shellcheck disable=SC2034
+    dpkg-deb -c "$package" | while IFS=" " read -r col1 col2 col3 col4 col5 col6 col7 col8
+    do
+        echo "$col1 $col2 $col6 $col7 $col8" | sort -k 3
+    done
     echo "------------------------------------------------"
   done
 fi

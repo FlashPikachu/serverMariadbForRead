@@ -1,5 +1,5 @@
 /* Copyright (c) 2000, 2015, Oracle and/or its affiliates.
-   Copyright (c) 2008, 2020, MariaDB
+   Copyright (c) 2008, 2022, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -428,7 +428,8 @@ bool Item_sum::register_sum_func(THD *thd, Item **ref)
          sl= sl->master_unit()->outer_select() )
       sl->master_unit()->item->with_flags|= item_with_t::SUM_FUNC;
   }
-  thd->lex->current_select->mark_as_dependent(thd, aggr_sel, NULL);
+  if (aggr_sel)
+    thd->lex->current_select->mark_as_dependent(thd, aggr_sel, NULL);
 
   if ((thd->lex->describe & DESCRIBE_EXTENDED) && aggr_sel)
   {
@@ -552,10 +553,18 @@ Item *Item_sum::get_tmp_table_item(THD *thd)
       Item *arg= sum_item->args[i];
       if (!arg->const_item())
       {
-	if (arg->type() == Item::FIELD_ITEM)
-	  ((Item_field*) arg)->field= result_field_tmp++;
-	else
-	  sum_item->args[i]= new (thd->mem_root) Item_temptable_field(thd, result_field_tmp++);
+        if (arg->type() == Item::FIELD_ITEM)
+        {
+          ((Item_field*) arg)->field= result_field_tmp++;
+        }
+        else
+        {
+          auto item_field=
+            new (thd->mem_root) Item_field(thd, result_field_tmp++);
+          if (item_field)
+            item_field->set_refers_to_temp_table(true);
+          sum_item->args[i]= item_field;
+        }
       }
     }
   }
@@ -1470,8 +1479,7 @@ Item_sum_sp::fix_length_and_dec(THD *thd)
 
 LEX_CSTRING Item_sum_sp::func_name_cstring() const
 {
-  THD *thd= current_thd;
-  return Item_sp::func_name_cstring(thd);
+  return Item_sp::func_name_cstring(current_thd, false);
 }
 
 Item* Item_sum_sp::copy_or_same(THD *thd)
@@ -1552,6 +1560,8 @@ void Item_sum_sum::fix_length_and_dec_decimal()
   decimals= args[0]->decimals;
   /* SUM result can't be longer than length(arg) + length(MAX_ROWS) */
   int precision= args[0]->decimal_precision() + DECIMAL_LONGLONG_DIGITS;
+  decimals= MY_MIN(decimals, DECIMAL_MAX_SCALE);
+  precision= MY_MIN(precision, DECIMAL_MAX_PRECISION);
   max_length= my_decimal_precision_to_length_no_truncation(precision,
                                                            decimals,
                                                            unsigned_flag);
@@ -1963,12 +1973,12 @@ void Item_sum_avg::fix_length_and_dec_decimal()
 {
   Item_sum_sum::fix_length_and_dec_decimal();
   int precision= args[0]->decimal_precision() + prec_increment;
-  decimals= MY_MIN(args[0]->decimals + prec_increment, DECIMAL_MAX_SCALE);
+  decimals= MY_MIN(args[0]->decimal_scale() + prec_increment, DECIMAL_MAX_SCALE);
   max_length= my_decimal_precision_to_length_no_truncation(precision,
                                                            decimals,
                                                            unsigned_flag);
   f_precision= MY_MIN(precision+DECIMAL_LONGLONG_DIGITS, DECIMAL_MAX_PRECISION);
-  f_scale=  args[0]->decimals;
+  f_scale= args[0]->decimal_scale();
   dec_bin_size= my_decimal_get_binary_size(f_precision, f_scale);
 }
 
@@ -2372,8 +2382,15 @@ Item *Item_sum_variance::result_item(THD *thd, Field *field)
 void Item_sum_min_max::clear()
 {
   DBUG_ENTER("Item_sum_min_max::clear");
-  value->clear();
-  null_value= 1;
+  /*
+    We should not clear const items (from SELECT MIN(key) from t1) as then we would loose the
+    value cached in opt_sum_query() where we replace MIN/MAX/COUNT with constants.
+  */
+  if (!const_item())
+  {
+    value->clear();
+    null_value= 1;
+  }
   DBUG_VOID_RETURN;
 }
 
@@ -2486,9 +2503,12 @@ void Item_sum_min_max::no_rows_in_result()
   /* We may be called here twice in case of ref field in function */
   if (was_values)
   {
+    bool org_const_item_cache= const_item_cache;
     was_values= FALSE;
     was_null_value= value->null_value;
+    const_item_cache= 0;             // Ensure that clear works on const items
     clear();
+    const_item_cache= org_const_item_cache;
   }
   DBUG_VOID_RETURN;
 }
@@ -4254,9 +4274,9 @@ Item_func_group_concat::fix_fields(THD *thd, Item **ref)
   result.set_charset(collation.collation);
   result_field= 0;
   null_value= 1;
-  max_length= (uint32)MY_MIN(thd->variables.group_concat_max_len
-                             / collation.collation->mbminlen
-                             * collation.collation->mbmaxlen, UINT_MAX32);
+  max_length= (uint32) MY_MIN((ulonglong) thd->variables.group_concat_max_len
+                              / collation.collation->mbminlen
+                              * collation.collation->mbmaxlen, UINT_MAX32);
 
   uint32 offset;
   if (separator->needs_conversion(separator->length(), separator->charset(),

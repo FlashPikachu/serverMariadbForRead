@@ -1,5 +1,5 @@
 /* Copyright (C) 2009 MySQL AB
-   Copyright (c) 2019, 2020, MariaDB Corporation.
+   Copyright (c) 2019, 2022, MariaDB Corporation.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -519,7 +519,7 @@ public:
   } 
 
 
-  virtual ~Stat_table() {}
+  virtual ~Stat_table() = default;
 
   /**
     @brief
@@ -1705,7 +1705,7 @@ protected:
 
 public:
   
-  Count_distinct_field() {}
+  Count_distinct_field() = default;
 
   /**
     @param
@@ -2623,7 +2623,6 @@ int collect_statistics_for_index(THD *thd, TABLE *table, uint index)
 {
   int rc= 0;
   KEY *key_info= &table->key_info[index];
-  ha_rows rows= 0;
 
   DBUG_ENTER("collect_statistics_for_index");
 
@@ -2658,7 +2657,6 @@ int collect_statistics_for_index(THD *thd, TABLE *table, uint index)
 
     if (rc)
       break;
-    rows++;
     index_prefix_calc.add();
     rc= table->file->ha_index_next(table->record[0]);
   }
@@ -4026,50 +4024,16 @@ double Histogram_binary::point_selectivity(Field *field, key_range *endpoint,
   }
   else
   {
-    /* 
+    /*
       The value 'pos' fits within one single histogram bucket.
 
-      Histogram_binary buckets have the same numbers of rows, but they cover
-      different ranges of values.
-
-      We assume that values are uniformly distributed across the [0..1] value
-      range.
-    */
-
-    /* 
-      If all buckets covered value ranges of the same size, the width of
-      value range would be:
+      We also have avg_sel which is per-table average selectivity of col=const.
+      If there are popular values, this may be larger than one bucket, so 
+      cap the returned number by the selectivity of one bucket.
     */
     double avg_bucket_width= 1.0 / (get_width() + 1);
-    
-    /*
-      Let's see what is the width of value range that our bucket is covering.
-        (min==max currently. they are kept in the formula just in case we 
-         will want to extend it to handle multi-bucket case)
-    */
-    double inv_prec_factor= (double) 1.0 / prec_factor(); 
-    double current_bucket_width= 
-        (max + 1 == get_width() ?  1.0 : (get_value(max) * inv_prec_factor)) -
-        (min == 0 ?  0.0 : (get_value(min-1) * inv_prec_factor));
 
-    DBUG_ASSERT(current_bucket_width); /* We shouldn't get a one zero-width bucket */
-
-    /*
-      So:
-      - each bucket has the same #rows 
-      - values are unformly distributed across the [min_value,max_value] domain.
-
-      If a bucket has value range that's N times bigger then average, than
-      each value will have to have N times fewer rows than average.
-    */
-    sel= avg_sel * avg_bucket_width / current_bucket_width;
-
-    /*
-      (Q: if we just follow this proportion we may end up in a situation
-      where number of different values we expect to find in this bucket
-      exceeds the number of rows that this histogram has in a bucket. Are 
-      we ok with this or we would want to have certain caps?)
-    */
+    sel= MY_MIN(avg_bucket_width, avg_sel);
   }
   return sel;
 }

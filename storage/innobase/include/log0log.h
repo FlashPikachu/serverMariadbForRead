@@ -180,7 +180,7 @@ struct log_t
 
 private:
   /** The log sequence number of the last change of durable InnoDB files */
-  MY_ALIGNED(CPU_LEVEL1_DCACHE_LINESIZE)
+  alignas(CPU_LEVEL1_DCACHE_LINESIZE)
   std::atomic<lsn_t> lsn;
   /** the first guaranteed-durable log sequence number */
   std::atomic<lsn_t> flushed_to_disk_lsn;
@@ -203,7 +203,7 @@ typedef srw_lock log_rwlock_t;
 
 public:
   /** rw-lock protecting buf */
-  MY_ALIGNED(CPU_LEVEL1_DCACHE_LINESIZE) log_rwlock_t latch;
+  alignas(CPU_LEVEL1_DCACHE_LINESIZE) log_rwlock_t latch;
 private:
   /** Last written LSN */
   lsn_t write_lsn;
@@ -216,6 +216,11 @@ public:
   /** number of std::swap(buf, flush_buf) and writes from buf to log;
   protected by latch.wr_lock() */
   ulint write_to_log;
+
+  /** Log sequence number when a log file overwrite (broken crash recovery)
+  was noticed. Protected by latch.wr_lock(). */
+  lsn_t overwrite_warned;
+
   /** innodb_log_buffer_size (size of buf,flush_buf if !is_pmem(), in bytes) */
   size_t buf_size;
 
@@ -230,7 +235,7 @@ private:
   byte *resize_flush_buf;
 
   /** spin lock protecting lsn, buf_free in append_prepare() */
-  MY_ALIGNED(CPU_LEVEL1_DCACHE_LINESIZE) pthread_mutex_t lsn_lock;
+  alignas(CPU_LEVEL1_DCACHE_LINESIZE) pthread_mutex_t lsn_lock;
   void init_lsn_lock() { pthread_mutex_init(&lsn_lock, LSN_LOCK_ATTR); }
   void lock_lsn() { pthread_mutex_lock(&lsn_lock); }
   void unlock_lsn() { pthread_mutex_unlock(&lsn_lock); }
@@ -260,6 +265,16 @@ public:
   uint32_t format;
   /** Log file */
   log_file_t log;
+#if defined __linux__ || defined _WIN32
+  /** whether file system caching is enabled for the log */
+  my_bool log_buffered;
+# ifdef _WIN32
+  static constexpr bool log_maybe_unbuffered= true;
+# else
+  /** whether file system caching may be disabled */
+  bool log_maybe_unbuffered;
+# endif
+#endif
 
 	/** Fields involved in checkpoints @{ */
 	lsn_t		log_capacity;	/*!< capacity of the log; if
@@ -279,7 +294,7 @@ public:
 					new query step is started */
   /** latest completed checkpoint (protected by latch.wr_lock()) */
   Atomic_relaxed<lsn_t> last_checkpoint_lsn;
-  /** next checkpoint LSN (protected by log_sys.mutex) */
+  /** next checkpoint LSN (protected by log_sys.latch) */
   lsn_t next_checkpoint_lsn;
   /** next checkpoint number (protected by latch.wr_lock()) */
   ulint next_checkpoint_no;
@@ -343,6 +358,11 @@ public:
   { return resize_buf + resize_target; }
 #endif
 
+#if defined __linux__ || defined _WIN32
+  /** Try to enable or disable file system caching (update log_buffered) */
+  void set_buffered(bool buffered);
+#endif
+
   void attach(log_file_t file, os_offset_t size);
 
   void close_file();
@@ -358,7 +378,6 @@ public:
 
   lsn_t get_lsn(std::memory_order order= std::memory_order_relaxed) const
   { return lsn.load(order); }
-  void set_lsn(lsn_t lsn) { this->lsn.store(lsn, std::memory_order_release); }
 
   lsn_t get_flushed_lsn(std::memory_order order= std::memory_order_acquire)
     const noexcept
@@ -495,11 +514,10 @@ public:
 /** Redo log system */
 extern log_t	log_sys;
 
-inline void log_free_check()
-{
-  if (log_sys.check_flush_or_checkpoint())
-    log_check_margins();
-}
+/** Wait for a log checkpoint if needed.
+NOTE that this function may only be called while not holding
+any synchronization objects except dict_sys.latch. */
+void log_free_check();
 
 /** Release the latches that protect log resizing. */
 void log_resize_release();

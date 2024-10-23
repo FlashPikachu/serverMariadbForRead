@@ -85,6 +85,7 @@ public:
     ALTER_TABLE_LOCK_EXCLUSIVE
   };
 
+  Lex_table_name db, table_name;
 
   // Columns and keys to be dropped.
   List<Alter_drop>              drop_list;
@@ -234,6 +235,8 @@ public:
    */
   enum_alter_table_algorithm algorithm(const THD *thd) const;
 
+  uint check_vcol_field(Item_field *f) const;
+
 private:
   Alter_info &operator=(const Alter_info &rhs); // not implemented
   Alter_info(const Alter_info &rhs);            // not implemented
@@ -372,11 +375,9 @@ protected:
   /**
     Constructor.
   */
-  Sql_cmd_common_alter_table()
-  {}
+  Sql_cmd_common_alter_table() = default;
 
-  virtual ~Sql_cmd_common_alter_table()
-  {}
+  virtual ~Sql_cmd_common_alter_table() = default;
 
   virtual enum_sql_command sql_command_code() const
   {
@@ -395,11 +396,9 @@ public:
   /**
     Constructor, used to represent a ALTER TABLE statement.
   */
-  Sql_cmd_alter_table()
-  {}
+  Sql_cmd_alter_table() = default;
 
-  ~Sql_cmd_alter_table()
-  {}
+  ~Sql_cmd_alter_table() = default;
 
   Storage_engine_name *option_storage_engine_name() { return this; }
 
@@ -421,8 +420,7 @@ public:
    :DDL_options(options)
   {}
 
-  ~Sql_cmd_alter_sequence()
-  {}
+  ~Sql_cmd_alter_sequence() = default;
 
   enum_sql_command sql_command_code() const
   {

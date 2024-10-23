@@ -168,6 +168,7 @@ if ($USE_CHILD_GROUP2)
   }
 }
 --connection master_1
+--disable_ps2_protocol
 SELECT a.pkey FROM tbl_a a, tbl_b b WHERE a.pkey = b.pkey;
 if ($USE_CHILD_GROUP2)
 {
@@ -179,21 +180,21 @@ if ($USE_CHILD_GROUP2)
   --connection child2_1
   if ($USE_GENERAL_LOG)
   {
---replace_regex /tmp_spider_bka_0x[0-9a-f]*/tmp_spider_bka_xxxx/
+--replace_regex /tmp_spider_bka_(0x)?[0-9a-f]*/tmp_spider_bka_xxxx/
     eval $CHILD2_1_SELECT_ARGUMENT1;
   }
   eval $CHILD2_1_SELECT_TABLES;
   --connection child2_2
   if ($USE_GENERAL_LOG)
   {
---replace_regex /tmp_spider_bka_0x[0-9a-f]*/tmp_spider_bka_xxxx/
+--replace_regex /tmp_spider_bka_(0x)?[0-9a-f]*/tmp_spider_bka_xxxx/
     eval $CHILD2_2_SELECT_ARGUMENT1;
   }
   eval $CHILD2_2_SELECT_TABLES;
   --connection child2_3
   if ($USE_GENERAL_LOG)
   {
---replace_regex /tmp_spider_bka_0x[0-9a-f]*/tmp_spider_bka_xxxx/
+--replace_regex /tmp_spider_bka_(0x)?[0-9a-f]*/tmp_spider_bka_xxxx/
     eval $CHILD2_3_SELECT_ARGUMENT1;
   }
   eval $CHILD2_3_SELECT_TABLES;
@@ -203,6 +204,7 @@ if ($USE_CHILD_GROUP2)
     --enable_result_log
   }
 }
+--enable_ps2_protocol
 
 --echo
 --echo deinit

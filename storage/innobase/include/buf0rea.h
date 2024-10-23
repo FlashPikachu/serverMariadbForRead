@@ -33,10 +33,11 @@ Created 11/5/1995 Heikki Tuuri
 buffer buf_pool if it is not already there. Sets the io_fix flag and sets
 an exclusive lock on the buffer frame. The flag is cleared and the x-lock
 released by the i/o-handler thread.
-@param[in]	page_id		page id
-@param[in]	zip_size	ROW_FORMAT=COMPRESSED page size, or 0
-@retval DB_SUCCESS if the page was read and is not corrupted,
-@retval DB_PAGE_CORRUPTED if page based on checksum check is corrupted,
+@param page_id   page id
+@param zip_size  ROW_FORMAT=COMPRESSED page size, or 0
+@retval DB_SUCCESS if the page was read and is not corrupted
+@retval DB_SUCCESS_LOCKED_REC if the page was not read
+@retval DB_PAGE_CORRUPTED if page based on checksum check is corrupted
 @retval DB_DECRYPTION_FAILED if page post encryption checksum matches but
 after decryption normal page checksum does not match.
 @retval DB_TABLESPACE_DELETED if tablespace .ibd file is missing */
@@ -101,10 +102,13 @@ which could result in a deadlock if the OS does not support asynchronous io.
 ulint
 buf_read_ahead_linear(const page_id_t page_id, ulint zip_size, bool ibuf);
 
-/** Issue read requests for pages that need to be recovered.
-@param space_id	tablespace identifier
-@param page_nos	page numbers to read, in ascending order */
-void buf_read_recv_pages(uint32_t space_id, st_::span<uint32_t> page_nos);
+/** Schedule a page for recovery.
+@param space    tablespace
+@param page_id  page identifier
+@param recs     log records
+@param init     page initialization, or nullptr if the page needs to be read */
+void buf_read_recover(fil_space_t *space, const page_id_t page_id,
+                      page_recv_t &recs, recv_init *init);
 
 /** @name Modes used in read-ahead @{ */
 /** read only pages belonging to the insert buffer tree */

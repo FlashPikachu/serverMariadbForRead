@@ -591,10 +591,11 @@ private:
   */
   bool create_handler_file(const char *name);
   bool setup_engine_array(MEM_ROOT *mem_root, handlerton *first_engine);
-  bool read_par_file(const char *name);
+  int read_par_file(const char *name);
   handlerton *get_def_part_engine(const char *name);
   bool get_from_handler_file(const char *name, MEM_ROOT *mem_root,
                              bool is_clone);
+  bool re_create_par_file(const char *name);
   bool new_handlers_from_part_info(MEM_ROOT *mem_root);
   bool create_handlers(MEM_ROOT *mem_root);
   void clear_handler_file();
@@ -1304,7 +1305,18 @@ public:
       The following code is not safe if you are using different
       storage engines or different index types per partition.
     */
-    return m_file[0]->index_flags(inx, part, all_parts);
+    ulong part_flags= m_file[0]->index_flags(inx, part, all_parts);
+
+    /*
+      The underlying storage engine might support Rowid Filtering. But
+      ha_partition does not forward the needed SE API calls, so the feature
+      will not be used.
+
+      Note: It's the same with IndexConditionPushdown, except for its variant
+      of IndexConditionPushdown+BatchedKeyAccess (that one works). Because of
+      that, we do not clear HA_DO_INDEX_COND_PUSHDOWN here.
+    */
+    return part_flags & ~HA_DO_RANGE_FILTER_PUSHDOWN;
   }
 
   /**
@@ -1366,7 +1378,7 @@ public:
   void release_auto_increment() override;
 private:
   int reset_auto_increment(ulonglong value) override;
-  void update_next_auto_inc_val();
+  int update_next_auto_inc_val();
   virtual void lock_auto_increment()
   {
     /* lock already taken */
@@ -1405,15 +1417,18 @@ private:
     unlock_auto_increment();
   }
 
-  void check_insert_autoincrement()
+  void check_insert_or_replace_autoincrement()
   {
     /*
-      If we INSERT into the table having the AUTO_INCREMENT column,
+      If we INSERT or REPLACE into the table having the AUTO_INCREMENT column,
       we have to read all partitions for the next autoincrement value
       unless we already did it.
     */
     if (!part_share->auto_inc_initialized &&
-        ha_thd()->lex->sql_command == SQLCOM_INSERT &&
+        (ha_thd()->lex->sql_command == SQLCOM_INSERT ||
+         ha_thd()->lex->sql_command == SQLCOM_INSERT_SELECT ||
+         ha_thd()->lex->sql_command == SQLCOM_REPLACE ||
+         ha_thd()->lex->sql_command == SQLCOM_REPLACE_SELECT) &&
         table->found_next_number_field)
       bitmap_set_all(&m_part_info->read_partitions);
   }
@@ -1605,6 +1620,10 @@ public:
   }
 
   bool partition_engine() override { return 1;}
+
+  /**
+     Get the number of records in part_elem and its subpartitions, if any.
+  */
   ha_rows part_records(partition_element *part_elem)
   {
     DBUG_ASSERT(m_part_info);
@@ -1616,7 +1635,6 @@ public:
     for (; part_id < part_id_end; ++part_id)
     {
       handler *file= m_file[part_id];
-      DBUG_ASSERT(bitmap_is_set(&(m_part_info->read_partitions), part_id));
       file->info(HA_STATUS_VARIABLE | HA_STATUS_NO_LOCK | HA_STATUS_OPEN);
       part_recs+= file->stats.records;
     }
@@ -1628,16 +1646,9 @@ public:
 
   friend int cmp_key_rowid_part_id(void *ptr, uchar *ref1, uchar *ref2);
   friend int cmp_key_part_id(void *key_p, uchar *ref1, uchar *ref2);
-  bool can_convert_string(
-      const Field_string* field,
-      const Column_definition& new_field) const override;
 
-  bool can_convert_varstring(
-      const Field_varstring* field,
-      const Column_definition& new_field) const override;
-
-  bool can_convert_blob(
-      const Field_blob* field,
-      const Column_definition& new_field) const override;
+  bool can_convert_nocopy(const Field &field,
+                          const Column_definition &new_field) const override;
+  void handler_stats_updated() override;
 };
 #endif /* HA_PARTITION_INCLUDED */

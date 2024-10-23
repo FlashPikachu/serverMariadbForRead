@@ -3,6 +3,7 @@
 #-----------------------------------------------------------------------------
 
 --source include/have_innodb.inc
+--source include/no_valgrind_without_big.inc
 --source include/default_charset.inc
 let collation=UTF8_UNICODE_CI;
 --source include/have_collation.inc
@@ -1348,3 +1349,4 @@ ALTER TABLE t1 KEY_BLOCK_SIZE=0;
 SET GLOBAL innodb_read_only_compressed=@save_innodb_read_only_compressed;
 --enable_query_log
 DROP TABLE t1;
+

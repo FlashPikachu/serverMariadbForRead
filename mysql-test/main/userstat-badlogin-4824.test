@@ -1,6 +1,10 @@
 #
 # MDEV-4824 userstats - wrong user statistics
 #
+# Tests will be skipped for the view protocol because the view protocol creates 
+# an additional util connection and other statistics data
+-- source include/no_view_protocol.inc
+
 --source include/not_embedded.inc
 set @save_userstat=@@global.userstat;
 
@@ -8,6 +12,7 @@ create user foo@localhost identified by 'foo';
 flush user_statistics;
 set global userstat=1;
 
+--disable_ps2_protocol
 connect(foo, localhost, foo, foo);
 select 1;
 disconnect foo;
@@ -29,6 +34,7 @@ connection default;
 
 --replace_result 41 18
 select user, bytes_received from information_schema.user_statistics where user = 'foo';
+--enable_ps2_protocol
 
 drop user foo@localhost;
 set global userstat=@save_userstat;

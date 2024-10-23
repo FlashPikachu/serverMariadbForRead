@@ -422,7 +422,9 @@ bool table_value_constr::exec(SELECT_LEX *sl)
   DBUG_ENTER("table_value_constr::exec");
   List_iterator_fast<List_item> li(lists_of_values);
   List_item *elem;
+  THD *cur_thd= sl->parent_lex->thd;
   ha_rows send_records= 0;
+  int rc=0;
   
   if (select_options & SELECT_DESCRIBE)
     DBUG_RETURN(false);
@@ -438,10 +440,10 @@ bool table_value_constr::exec(SELECT_LEX *sl)
 
   while ((elem= li++))
   {
+    cur_thd->get_stmt_da()->inc_current_row_for_warning();
     if (send_records >= sl->master_unit()->lim.get_select_limit())
       break;
-    int rc=
-      result->send_data_with_check(*elem, sl->master_unit(), send_records);
+    rc= result->send_data_with_check(*elem, sl->master_unit(), send_records);
     if (!rc)
       send_records++;
     else if (rc > 0)
@@ -571,7 +573,7 @@ bool Item_func_in::create_value_list_for_tvc(THD *thd,
 
     if (is_list_of_rows)
     {
-      Item_row *row_list= (Item_row *)(args[i]->build_clone(thd));
+      Item_row *row_list= (Item_row *)(args[i]);
 
       if (!row_list)
         return true;
@@ -596,8 +598,7 @@ bool Item_func_in::create_value_list_for_tvc(THD *thd,
         sprintf(col_name, "_col_%i", 1);
         args[i]->set_name(thd, col_name, strlen(col_name), thd->charset());
       }
-      Item *arg_clone= args[i]->build_clone(thd);
-      if (!arg_clone || tvc_value->push_back(arg_clone))
+      if (tvc_value->push_back(args[i]))
         return true;
     }
 
@@ -706,6 +707,7 @@ st_select_lex *wrap_tvc(THD *thd, st_select_lex *tvc_sl,
   wrapper_sl->parent_lex= lex; /* Used in init_query. */
   wrapper_sl->init_query();
   wrapper_sl->init_select();
+  wrapper_sl->is_tvc_wrapper= true;
 
   wrapper_sl->nest_level= tvc_sl->nest_level;
   wrapper_sl->parsing_place= tvc_sl->parsing_place;
@@ -741,7 +743,7 @@ st_select_lex *wrap_tvc(THD *thd, st_select_lex *tvc_sl,
     Attach the select used of TVC as the only slave to the unit for
     the derived table tvc_x of the transformation
   */
-  derived_unit->add_slave(tvc_sl);
+  derived_unit->attach_single(tvc_sl);
   tvc_sl->set_linkage(DERIVED_TABLE_TYPE);
 
   /*
@@ -1171,12 +1173,10 @@ bool JOIN::transform_in_predicates_into_in_subq(THD *thd)
   {
     select_lex->parsing_place= IN_WHERE;
     conds=
-      conds->transform(thd,
-		       &Item::in_predicate_to_in_subs_transformer,
-                       (uchar*) 0);
+      conds->top_level_transform(thd,
+                                 &Item::in_predicate_to_in_subs_transformer, 0);
     if (!conds)
       DBUG_RETURN(true);
-    select_lex->prep_where= conds ? conds->copy_andor_structure(thd) : 0;
     select_lex->where= conds;
   }
 
@@ -1191,13 +1191,10 @@ bool JOIN::transform_in_predicates_into_in_subq(THD *thd)
       if (table->on_expr)
       {
         table->on_expr=
-          table->on_expr->transform(thd,
-		                    &Item::in_predicate_to_in_subs_transformer,
-                                    (uchar*) 0);
+          table->on_expr->top_level_transform(thd,
+                              &Item::in_predicate_to_in_subs_transformer, 0);
 	if (!table->on_expr)
 	  DBUG_RETURN(true);
-	table->prep_on_expr= table->on_expr ?
-                             table->on_expr->copy_andor_structure(thd) : 0;
       }
     }
   }
@@ -1207,4 +1204,3 @@ bool JOIN::transform_in_predicates_into_in_subq(THD *thd)
   thd->lex->current_select= save_current_select;
   DBUG_RETURN(false);
 }
-

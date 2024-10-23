@@ -8,7 +8,7 @@ Table	Create Table
 t1	CREATE TABLE `t1` (
   `a` char(5) DEFAULT NULL,
   `v` varchar(5) GENERATED ALWAYS AS (`a`) STORED
-) ENGINE=MyISAM DEFAULT CHARSET=latin1
+) ENGINE=MyISAM DEFAULT CHARSET=latin1 COLLATE=latin1_swedish_ci
 Warnings:
 Warning	1901	Function or expression '`a`' cannot be used in the GENERATED ALWAYS AS clause of `v`
 Warning	1105	Expression depends on the @@sql_mode value PAD_CHAR_TO_FULL_LENGTH
@@ -17,14 +17,14 @@ Table	Create Table
 t1	CREATE TABLE `t1` (
   `a` char(5) DEFAULT NULL,
   `v` varchar(5) GENERATED ALWAYS AS (`a`) STORED
-) ENGINE=MyISAM DEFAULT CHARSET=latin1
+) ENGINE=MyISAM DEFAULT CHARSET=latin1 COLLATE=latin1_swedish_ci
 FLUSH TABLES;
 SHOW CREATE TABLE t1;
 Table	Create Table
 t1	CREATE TABLE `t1` (
   `a` char(5) DEFAULT NULL,
   `v` varchar(5) GENERATED ALWAYS AS (`a`) STORED
-) ENGINE=MyISAM DEFAULT CHARSET=latin1
+) ENGINE=MyISAM DEFAULT CHARSET=latin1 COLLATE=latin1_swedish_ci
 Warnings:
 Warning	1901	Function or expression '`a`' cannot be used in the GENERATED ALWAYS AS clause of `v`
 Warning	1105	Expression depends on the @@sql_mode value PAD_CHAR_TO_FULL_LENGTH
@@ -61,7 +61,7 @@ Table	Create Table
 t1	CREATE TABLE `t1` (
   `a` char(5) DEFAULT NULL,
   `v` varchar(5) GENERATED ALWAYS AS (`a`) STORED
-) ENGINE=MyISAM DEFAULT CHARSET=latin1
+) ENGINE=MyISAM DEFAULT CHARSET=latin1 COLLATE=latin1_swedish_ci
 Warnings:
 Warning	1901	Function or expression '`a`' cannot be used in the GENERATED ALWAYS AS clause of `v`
 Warning	1105	Expression depends on the @@sql_mode value PAD_CHAR_TO_FULL_LENGTH
@@ -72,7 +72,10 @@ Table	Create Table
 t1	CREATE TABLE `t1` (
   `a` char(5) DEFAULT NULL,
   `v` varchar(5) GENERATED ALWAYS AS (`a`) STORED
-) ENGINE=MyISAM DEFAULT CHARSET=latin1
+) ENGINE=MyISAM DEFAULT CHARSET=latin1 COLLATE=latin1_swedish_ci
+Warnings:
+Warning	1901	Function or expression '`a`' cannot be used in the GENERATED ALWAYS AS clause of `v`
+Warning	1105	Expression depends on the @@sql_mode value PAD_CHAR_TO_FULL_LENGTH
 SELECT * FROM t1;
 a	v
 1	1
@@ -86,6 +89,9 @@ a	v
 1	1
 2	2
 3	3
+Warnings:
+Warning	1901	Function or expression '`a`' cannot be used in the GENERATED ALWAYS AS clause of `v`
+Warning	1105	Expression depends on the @@sql_mode value PAD_CHAR_TO_FULL_LENGTH
 DROP TABLE t1;
 #
 # Fixing a Maria-10.2.26 table with a stored VARCHAR column
@@ -109,7 +115,7 @@ Table	Create Table
 t1	CREATE TABLE `t1` (
   `a` char(5) DEFAULT NULL,
   `v` varchar(5) GENERATED ALWAYS AS (`a`) STORED
-) ENGINE=MyISAM DEFAULT CHARSET=latin1
+) ENGINE=MyISAM DEFAULT CHARSET=latin1 COLLATE=latin1_swedish_ci
 Warnings:
 Warning	1901	Function or expression '`a`' cannot be used in the GENERATED ALWAYS AS clause of `v`
 Warning	1105	Expression depends on the @@sql_mode value PAD_CHAR_TO_FULL_LENGTH
@@ -119,7 +125,7 @@ Table	Create Table
 t1	CREATE TABLE `t1` (
   `a` char(5) DEFAULT NULL,
   `v` varchar(5) GENERATED ALWAYS AS (rtrim(`a`)) STORED
-) ENGINE=MyISAM DEFAULT CHARSET=latin1
+) ENGINE=MyISAM DEFAULT CHARSET=latin1 COLLATE=latin1_swedish_ci
 DROP TABLE t1;
 #
 # Opening a Maria-10.2.26 table with a virtual VARCHAR column
@@ -131,7 +137,7 @@ t1	CREATE TABLE `t1` (
   `a` char(5) DEFAULT NULL,
   `v` varchar(5) GENERATED ALWAYS AS (`a`) VIRTUAL,
   KEY `v` (`v`)
-) ENGINE=MyISAM DEFAULT CHARSET=latin1
+) ENGINE=MyISAM DEFAULT CHARSET=latin1 COLLATE=latin1_swedish_ci
 Warnings:
 Warning	1901	Function or expression '`a`' cannot be used in the GENERATED ALWAYS AS clause of `v`
 Warning	1105	Expression depends on the @@sql_mode value PAD_CHAR_TO_FULL_LENGTH
@@ -141,7 +147,7 @@ t1	CREATE TABLE `t1` (
   `a` char(5) DEFAULT NULL,
   `v` varchar(5) GENERATED ALWAYS AS (`a`) VIRTUAL,
   KEY `v` (`v`)
-) ENGINE=MyISAM DEFAULT CHARSET=latin1
+) ENGINE=MyISAM DEFAULT CHARSET=latin1 COLLATE=latin1_swedish_ci
 FLUSH TABLES;
 SHOW CREATE TABLE t1;
 Table	Create Table
@@ -149,7 +155,7 @@ t1	CREATE TABLE `t1` (
   `a` char(5) DEFAULT NULL,
   `v` varchar(5) GENERATED ALWAYS AS (`a`) VIRTUAL,
   KEY `v` (`v`)
-) ENGINE=MyISAM DEFAULT CHARSET=latin1
+) ENGINE=MyISAM DEFAULT CHARSET=latin1 COLLATE=latin1_swedish_ci
 Warnings:
 Warning	1901	Function or expression '`a`' cannot be used in the GENERATED ALWAYS AS clause of `v`
 Warning	1105	Expression depends on the @@sql_mode value PAD_CHAR_TO_FULL_LENGTH
@@ -187,7 +193,7 @@ t1	CREATE TABLE `t1` (
   `a` char(5) DEFAULT NULL,
   `v` varchar(5) GENERATED ALWAYS AS (`a`) VIRTUAL,
   KEY `v` (`v`)
-) ENGINE=MyISAM DEFAULT CHARSET=latin1
+) ENGINE=MyISAM DEFAULT CHARSET=latin1 COLLATE=latin1_swedish_ci
 Warnings:
 Warning	1901	Function or expression '`a`' cannot be used in the GENERATED ALWAYS AS clause of `v`
 Warning	1105	Expression depends on the @@sql_mode value PAD_CHAR_TO_FULL_LENGTH
@@ -201,6 +207,9 @@ a	v
 1	1
 2	2
 3	3
+Warnings:
+Warning	1901	Function or expression '`a`' cannot be used in the GENERATED ALWAYS AS clause of `v`
+Warning	1105	Expression depends on the @@sql_mode value PAD_CHAR_TO_FULL_LENGTH
 DROP TABLE t1;
 #
 # Fixing a Maria-10.2.26 table with a virtual VARCHAR column
@@ -213,7 +222,7 @@ t1	CREATE TABLE `t1` (
   `a` char(5) DEFAULT NULL,
   `v` varchar(5) GENERATED ALWAYS AS (`a`) VIRTUAL,
   KEY `v` (`v`)
-) ENGINE=MyISAM DEFAULT CHARSET=latin1
+) ENGINE=MyISAM DEFAULT CHARSET=latin1 COLLATE=latin1_swedish_ci
 Warnings:
 Warning	1901	Function or expression '`a`' cannot be used in the GENERATED ALWAYS AS clause of `v`
 Warning	1105	Expression depends on the @@sql_mode value PAD_CHAR_TO_FULL_LENGTH
@@ -232,7 +241,7 @@ t1	CREATE TABLE `t1` (
   `a` char(5) DEFAULT NULL,
   `v` varchar(5) GENERATED ALWAYS AS (`a`) VIRTUAL,
   KEY `v` (`v`)
-) ENGINE=MyISAM DEFAULT CHARSET=latin1
+) ENGINE=MyISAM DEFAULT CHARSET=latin1 COLLATE=latin1_swedish_ci
 Warnings:
 Warning	1901	Function or expression '`a`' cannot be used in the GENERATED ALWAYS AS clause of `v`
 Warning	1105	Expression depends on the @@sql_mode value PAD_CHAR_TO_FULL_LENGTH
@@ -242,7 +251,7 @@ Table	Create Table
 t1	CREATE TABLE `t1` (
   `a` char(5) DEFAULT NULL,
   `v` varchar(5) GENERATED ALWAYS AS (`a`) VIRTUAL
-) ENGINE=MyISAM DEFAULT CHARSET=latin1
+) ENGINE=MyISAM DEFAULT CHARSET=latin1 COLLATE=latin1_swedish_ci
 SELECT * FROM t1;
 a	v
 1	1
@@ -260,7 +269,7 @@ Table	Create Table
 t1	CREATE TABLE `t1` (
   `a` char(5) DEFAULT NULL,
   `v` varchar(5) GENERATED ALWAYS AS (`a`) VIRTUAL
-) ENGINE=MyISAM DEFAULT CHARSET=latin1
+) ENGINE=MyISAM DEFAULT CHARSET=latin1 COLLATE=latin1_swedish_ci
 SELECT * FROM t1;
 a	v
 1	1
@@ -275,7 +284,7 @@ t1	CREATE TABLE `t1` (
   `a` char(5) DEFAULT NULL,
   `v` varchar(5) GENERATED ALWAYS AS (`a`) VIRTUAL,
   KEY `v` (`v`)
-) ENGINE=MyISAM DEFAULT CHARSET=latin1
+) ENGINE=MyISAM DEFAULT CHARSET=latin1 COLLATE=latin1_swedish_ci
 Warnings:
 Warning	1901	Function or expression '`a`' cannot be used in the GENERATED ALWAYS AS clause of `v`
 Warning	1105	Expression depends on the @@sql_mode value PAD_CHAR_TO_FULL_LENGTH
@@ -286,7 +295,7 @@ t1	CREATE TABLE `t1` (
   `a` char(5) DEFAULT NULL,
   `v` varchar(5) GENERATED ALWAYS AS (rtrim(`a`)) VIRTUAL,
   KEY `v` (`v`)
-) ENGINE=MyISAM DEFAULT CHARSET=latin1
+) ENGINE=MyISAM DEFAULT CHARSET=latin1 COLLATE=latin1_swedish_ci
 SELECT * FROM t1;
 a	v
 1	1
@@ -299,7 +308,7 @@ t2	CREATE TABLE `t2` (
   `a` char(5) DEFAULT NULL,
   `v` varchar(5) GENERATED ALWAYS AS (rtrim(`a`)) VIRTUAL,
   KEY `v` (`v`)
-) ENGINE=MyISAM DEFAULT CHARSET=latin1
+) ENGINE=MyISAM DEFAULT CHARSET=latin1 COLLATE=latin1_swedish_ci
 DROP TABLE t2;
 DROP TABLE t1;
 #

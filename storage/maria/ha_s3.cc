@@ -233,7 +233,7 @@ ha_create_table_option s3_table_option_list[]=
 
 
 ha_s3::ha_s3(handlerton *hton, TABLE_SHARE *table_arg)
-  :ha_maria(hton, table_arg), in_alter_table(S3_NO_ALTER)
+  :ha_maria(hton, table_arg), in_alter_table(S3_NO_ALTER), open_args(NULL)
 {
   /* Remove things that S3 doesn't support */
   int_table_flags&= ~(HA_BINLOG_ROW_CAPABLE | HA_BINLOG_STMT_CAPABLE |
@@ -640,6 +640,7 @@ int ha_s3::open(const char *name, int mode, uint open_flags)
       file->dfile.big_block_size= file->s->kfile.big_block_size=
         file->s->bitmap.file.big_block_size= file->s->base.s3_block_size;
       file->s->kfile.head_blocks= file->s->base.keystart / file->s->block_size;
+      file->s->no_status_updates= in_alter_table == S3_NO_ALTER;
     }
   }
   open_args= 0;

@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 1996, 2016, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2017, 2022, MariaDB Corporation.
+Copyright (c) 2017, 2023, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -725,7 +725,7 @@ dict_build_field_def_step(
 }
 
 /***************************************************************//**
-Creates an index tree for the index if it is not a member of a cluster.
+Creates an index tree for the index.
 @return DB_SUCCESS or DB_OUT_OF_FILE_SPACE */
 static MY_ATTRIBUTE((nonnull, warn_unused_result))
 dberr_t
@@ -754,51 +754,62 @@ dict_create_index_tree_step(
 	mtr.start();
 
 	search_tuple = dict_create_search_tuple(node->ind_row, node->heap);
+	node->page_no = FIL_NULL;
+	pcur.btr_cur.page_cur.index =
+		UT_LIST_GET_FIRST(dict_sys.sys_indexes->indexes);
 
-	btr_pcur_open(UT_LIST_GET_FIRST(dict_sys.sys_indexes->indexes),
-		      search_tuple, PAGE_CUR_L, BTR_MODIFY_LEAF,
-		      &pcur, &mtr);
+	dberr_t err = btr_pcur_open(search_tuple, PAGE_CUR_L, BTR_MODIFY_LEAF,
+				    &pcur, &mtr);
+
+	if (err != DB_SUCCESS) {
+func_exit:
+		mtr.commit();
+		return err;
+	}
 
 	btr_pcur_move_to_next_user_rec(&pcur, &mtr);
 
+	if (UNIV_UNLIKELY(btr_pcur_is_after_last_on_page(&pcur))) {
+corrupted:
+		err = DB_CORRUPTION;
+		goto func_exit;
+	}
 
-	dberr_t		err = DB_SUCCESS;
+	ulint	len;
+	byte*	data = rec_get_nth_field_old(btr_pcur_get_rec(&pcur),
+					     DICT_FLD__SYS_INDEXES__ID,
+					     &len);
+	if (UNIV_UNLIKELY(len != 8 || mach_read_from_8(data) != index->id)) {
+		goto corrupted;
+	}
 
-	if (!index->is_readable()) {
-		node->page_no = FIL_NULL;
-	} else {
+	data = rec_get_nth_field_old(btr_pcur_get_rec(&pcur),
+				     DICT_FLD__SYS_INDEXES__PAGE_NO, &len);
+	if (len != 4) {
+		goto corrupted;
+	}
+
+	if (index->is_readable()) {
 		index->set_modified(mtr);
 
 		node->page_no = btr_create(
 			index->type, index->table->space,
-			index->id, index, &mtr);
-
-		if (node->page_no == FIL_NULL) {
-			err = DB_OUT_OF_FILE_SPACE;
-		}
+			index->id, index, &mtr, &err);
 
 		DBUG_EXECUTE_IF("ib_import_create_index_failure_1",
 				node->page_no = FIL_NULL;
 				err = DB_OUT_OF_FILE_SPACE; );
 	}
 
-	ulint	len;
-	byte*	data = rec_get_nth_field_old(btr_pcur_get_rec(&pcur),
-					     DICT_FLD__SYS_INDEXES__PAGE_NO,
-					     &len);
-	ut_ad(len == 4);
 	mtr.write<4,mtr_t::MAYBE_NOP>(*btr_pcur_get_block(&pcur), data,
 				      node->page_no);
-
-	mtr.commit();
-
-	return(err);
+	goto func_exit;
 }
 
 /***************************************************************//**
 Creates an index tree for the index if it is not a member of a cluster.
 Don't update SYSTEM TABLES.
-@return DB_SUCCESS or DB_OUT_OF_FILE_SPACE */
+@return error code */
 dberr_t
 dict_create_index_tree_in_mem(
 /*==========================*/
@@ -818,13 +829,14 @@ dict_create_index_tree_in_mem(
 	ut_ad(index->is_readable());
 	ut_ad(!(index->table->flags2 & DICT_TF2_DISCARDED));
 
+	dberr_t err;
 	index->page = btr_create(index->type, index->table->space,
-				 index->id, index, &mtr);
+				 index->id, index, &mtr, &err);
 	mtr_commit(&mtr);
 
 	index->trx_id = trx->id;
 
-	return index->page == FIL_NULL ? DB_OUT_OF_FILE_SPACE : DB_SUCCESS;
+	return err;
 }
 
 /** Drop the index tree associated with a row in SYS_INDEXES table.
@@ -1099,7 +1111,7 @@ dict_create_table_step(
 	}
 
 	if (node->state == TABLE_ADD_TO_CACHE) {
-		node->table->can_be_evicted = true;
+		node->table->can_be_evicted = !node->table->fts;
 		node->table->add_to_cache();
 
 		err = DB_SUCCESS;
@@ -1108,15 +1120,7 @@ dict_create_table_step(
 function_exit:
 	trx->error_state = err;
 
-	if (err == DB_SUCCESS) {
-		/* Ok: do nothing */
-
-	} else if (err == DB_LOCK_WAIT) {
-
-		return(NULL);
-	} else {
-		/* SQL error detected */
-
+	if (err != DB_SUCCESS) {
 		return(NULL);
 	}
 
@@ -1300,16 +1304,8 @@ dict_create_index_step(
 function_exit:
 	trx->error_state = err;
 
-	if (err == DB_SUCCESS) {
-		/* Ok: do nothing */
-
-	} else if (err == DB_LOCK_WAIT) {
-
-		return(NULL);
-	} else {
-		/* SQL error detected */
-
-		return(NULL);
+	if (UNIV_UNLIKELY(err != DB_SUCCESS)) {
+		return nullptr;
 	}
 
 	thr->run_node = que_node_get_parent(node);

@@ -822,7 +822,6 @@ enum options_mysqld
   OPT_SERVER_ID,
   OPT_SILENT,
   OPT_SKIP_HOST_CACHE,
-  OPT_SKIP_RESOLVE,
   OPT_SLAVE_PARALLEL_MODE,
   OPT_SSL_CA,
   OPT_SSL_CAPATH,
@@ -903,6 +902,12 @@ enum enum_query_type
   // it evaluates to. Should be used for error messages, so that they
   // don't reveal values.
   QT_NO_DATA_EXPANSION= (1 << 9),
+  // Remove wrappers added for TVC when creating or showing view
+  QT_NO_WRAPPERS_FOR_TVC_IN_VIEW= (1 << 12),
+
+  // The temporary tables used by the query might be freed by the time
+  // this print() call is made.
+  QT_DONT_ACCESS_TMP_TABLES= (1 << 13)
 };
 
 
@@ -965,7 +970,6 @@ extern my_bool opt_stack_trace, disable_log_notes;
 extern my_bool opt_expect_abort;
 extern my_bool opt_slave_sql_verify_checksum;
 extern my_bool opt_mysql56_temporal_format, strict_password_validation;
-extern my_bool opt_explicit_defaults_for_timestamp;
 extern ulong binlog_checksum_options;
 extern bool max_user_connections_checking;
 extern ulong opt_binlog_dbug_fsync_sleep;

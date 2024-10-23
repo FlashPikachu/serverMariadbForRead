@@ -46,6 +46,7 @@
 #include "sql_audit.h"
 #include "debug_sync.h"
 #ifdef WITH_WSREP
+#include "wsrep.h"
 #include "wsrep_trans_observer.h"
 #endif /* WITH_WSREP */
 
@@ -221,6 +222,7 @@ sp_get_flags_for_command(LEX *lex)
   case SQLCOM_SHOW_DATABASES:
   case SQLCOM_SHOW_ERRORS:
   case SQLCOM_SHOW_EXPLAIN:
+  case SQLCOM_SHOW_ANALYZE:
   case SQLCOM_SHOW_FIELDS:
   case SQLCOM_SHOW_FUNC_CODE:
   case SQLCOM_SHOW_GENERIC:
@@ -411,6 +413,26 @@ Item *THD::sp_fix_func_item(Item **it_addr)
 
 
 /**
+  Prepare an Item for evaluation as an assignment source,
+  for assignment to the given target.
+
+  @param to        - the assignment target
+  @param it_addr   - a pointer on item refernce
+
+  @retval          -  NULL on error
+  @retval          -  a prepared item pointer on success
+*/
+Item *THD::sp_fix_func_item_for_assignment(const Field *to, Item **it_addr)
+{
+  DBUG_ENTER("THD::sp_fix_func_item_for_assignment");
+  Item *res= sp_fix_func_item(it_addr);
+  if (res && (!res->check_assignability_to(to, false)))
+    DBUG_RETURN(res);
+  DBUG_RETURN(NULL);
+}
+
+
+/**
   Evaluate an expression and store the result in the field.
 
   @param result_field           the field to store the result
@@ -557,7 +579,7 @@ sp_head::sp_head(MEM_ROOT *mem_root_arg, sp_package *parent,
    m_next_cached_sp(0),
    m_param_begin(NULL),
    m_param_end(NULL),
-   m_body_begin(NULL),
+   m_cpp_body_begin(NULL),
    m_thd_root(NULL),
    m_thd(NULL),
    m_pcont(new (&main_mem_root) sp_pcontext()),
@@ -818,18 +840,18 @@ sp_head::init_psi_share()
 
 
 void
-sp_head::set_body_start(THD *thd, const char *begin_ptr)
+sp_head::set_body_start(THD *thd, const char *cpp_body_start)
 {
-  m_body_begin= begin_ptr;
-  thd->m_parser_state->m_lip.body_utf8_start(thd, begin_ptr);
+  m_cpp_body_begin= cpp_body_start;
+  if (!m_parent)
+    thd->m_parser_state->m_lip.body_utf8_start(thd, cpp_body_start);
 }
 
 
 void
-sp_head::set_stmt_end(THD *thd)
+sp_head::set_stmt_end(THD *thd, const char *cpp_body_end)
 {
   Lex_input_stream *lip= & thd->m_parser_state->m_lip; /* shortcut */
-  const char *end_ptr= lip->get_cpp_ptr(); /* shortcut */
 
   /* Make the string of parameters. */
 
@@ -841,30 +863,27 @@ sp_head::set_stmt_end(THD *thd)
 
   /* Remember end pointer for further dumping of whole statement. */
 
-  thd->lex->stmt_definition_end= end_ptr;
+  thd->lex->stmt_definition_end= cpp_body_end;
 
   /* Make the string of body (in the original character set). */
 
-  m_body.length= end_ptr - m_body_begin;
-  m_body.str= thd->strmake(m_body_begin, m_body.length);
-  trim_whitespace(thd->charset(), &m_body);
+  m_body= thd->strmake_lex_cstring_trim_whitespace(
+                 Lex_cstring(m_cpp_body_begin, cpp_body_end));
 
   /* Make the string of UTF-body. */
 
-  lip->body_utf8_append(end_ptr);
+  lip->body_utf8_append(cpp_body_end);
 
-  m_body_utf8.length= lip->get_body_utf8_length();
-  m_body_utf8.str= thd->strmake(lip->get_body_utf8_str(), m_body_utf8.length);
-  trim_whitespace(thd->charset(), &m_body_utf8);
+  if (!m_parent)
+    m_body_utf8= thd->strmake_lex_cstring_trim_whitespace(lip->body_utf8());
 
   /*
     Make the string of whole stored-program-definition query (in the
     original character set).
   */
 
-  m_defstr.length= end_ptr - lip->get_cpp_buf();
-  m_defstr.str= thd->strmake(lip->get_cpp_buf(), m_defstr.length);
-  trim_whitespace(thd->charset(), &m_defstr);
+  m_defstr= thd->strmake_lex_cstring_trim_whitespace(
+                   Lex_cstring(lip->get_cpp_buf(), cpp_body_end));
 }
 
 
@@ -1498,7 +1517,7 @@ sp_head::execute(THD *thd, bool merge_da_on_success)
                                wsrep_current_error_status(thd));
           thd->wsrep_cs().reset_error();
           /* Reset also thd->killed if it has been set during BF abort. */
-          if (thd->killed == KILL_QUERY)
+          if (killed_mask_hard(thd->killed) == KILL_QUERY)
             thd->killed= NOT_KILLED;
           /* if failed transaction was not replayed, must return with error from here */
           if (!must_replay) err_status = 1;
@@ -1882,7 +1901,7 @@ sp_head::execute_trigger(THD *thd,
 
     my_error(ER_TABLEACCESS_DENIED_ERROR, MYF(0), priv_desc,
              thd->security_ctx->priv_user, thd->security_ctx->host_or_ip,
-             table_name->str);
+             db_name->str, table_name->str);
 
     m_security_ctx.restore_security_context(thd, save_ctx);
     DBUG_RETURN(TRUE);
@@ -2385,7 +2404,7 @@ sp_head::execute_procedure(THD *thd, List<Item> *args)
     Disable slow log if:
     - Slow logging is enabled (no change needed)
     - This is a normal SP (not event log)
-    - If we have not explicitely disabled logging of SP
+    - If we have not explicitly disabled logging of SP
   */
   if (save_enable_slow_log &&
       ((!(m_flags & LOG_SLOW_STATEMENTS) &&
@@ -2399,7 +2418,7 @@ sp_head::execute_procedure(THD *thd, List<Item> *args)
     Disable general log if:
     - If general log is enabled (no change needed)
     - This is a normal SP (not event log)
-    - If we have not explicitely disabled logging of SP
+    - If we have not explicitly disabled logging of SP
   */
   if (!(thd->variables.option_bits & OPTION_LOG_OFF) &&
       (!(m_flags & LOG_GENERAL_LOG) &&
@@ -3866,7 +3885,6 @@ int
 sp_instr_set::exec_core(THD *thd, uint *nextp)
 {
   int res= get_rcontext(thd)->set_variable(thd, m_offset, &m_value);
-  delete_explain_query(thd->lex);
   *nextp = m_ip+1;
   return res;
 }
@@ -3908,7 +3926,6 @@ sp_instr_set_row_field::exec_core(THD *thd, uint *nextp)
   int res= get_rcontext(thd)->set_variable_row_field(thd, m_offset,
                                                      m_field_offset,
                                                      &m_value);
-  delete_explain_query(thd->lex);
   *nextp= m_ip + 1;
   return res;
 }
@@ -3956,7 +3973,6 @@ sp_instr_set_row_field_by_name::exec_core(THD *thd, uint *nextp)
   int res= get_rcontext(thd)->set_variable_row_field_by_name(thd, m_offset,
                                                              m_field_name,
                                                              &m_value);
-  delete_explain_query(thd->lex);
   *nextp= m_ip + 1;
   return res;
 }
@@ -4128,7 +4144,7 @@ sp_instr_jump_if_not::exec_core(THD *thd, uint *nextp)
   Item *it;
   int res;
 
-  it= thd->sp_prepare_func_item(&m_expr);
+  it= thd->sp_prepare_func_item(&m_expr, 1);
   if (! it)
   {
     res= -1;

@@ -1,5 +1,5 @@
 /* Copyright (c) 2013, Kristian Nielsen and MariaDB Services Ab.
-   Copyright (c) 2020, MariaDB Corporation.
+   Copyright (c) 2020, 2022, MariaDB Corporation.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -46,9 +46,7 @@ rpl_slave_state::update_state_hash(uint64 sub_id, rpl_gtid *gtid, void *hton,
     there will not be an attempt to delete the corresponding table row before
     it is even committed.
   */
-  mysql_mutex_lock(&LOCK_slave_state);
   err= update(gtid->domain_id, gtid->server_id, sub_id, gtid->seq_no, hton, rgi);
-  mysql_mutex_unlock(&LOCK_slave_state);
   if (err)
   {
     sql_print_warning("Slave: Out of memory during slave state maintenance. "
@@ -294,10 +292,23 @@ int
 rpl_slave_state::update(uint32 domain_id, uint32 server_id, uint64 sub_id,
                         uint64 seq_no, void *hton, rpl_group_info *rgi)
 {
+  int res;
+  mysql_mutex_lock(&LOCK_slave_state);
+  res= update_nolock(domain_id, server_id, sub_id, seq_no, hton, rgi);
+  mysql_mutex_unlock(&LOCK_slave_state);
+  return res;
+}
+
+
+int
+rpl_slave_state::update_nolock(uint32 domain_id, uint32 server_id, uint64 sub_id,
+                               uint64 seq_no, void *hton, rpl_group_info *rgi)
+{
   element *elem= NULL;
   list_element *list_elem= NULL;
 
   DBUG_ASSERT(hton || !loaded);
+  mysql_mutex_assert_owner(&LOCK_slave_state);
   if (!(elem= get_element(domain_id)))
     return 1;
 
@@ -311,7 +322,6 @@ rpl_slave_state::update(uint32 domain_id, uint32 server_id, uint64 sub_id,
       of all pending MASTER_GTID_WAIT(), so we do not slow down the
       replication SQL thread.
     */
-    mysql_mutex_assert_owner(&LOCK_slave_state);
     elem->gtid_waiter= NULL;
     mysql_cond_broadcast(&elem->COND_wait_gtid);
   }
@@ -1392,6 +1402,7 @@ rpl_slave_state::load(THD *thd, const char *state_from_master, size_t len,
 {
   const char *end= state_from_master + len;
 
+  mysql_mutex_assert_not_owner(&LOCK_slave_state);
   if (reset)
   {
     if (truncate_state_table(thd))
@@ -1770,7 +1781,7 @@ rpl_binlog_state::alloc_element_nolock(const rpl_gtid *gtid)
 */
 bool
 rpl_binlog_state::check_strict_sequence(uint32 domain_id, uint32 server_id,
-                                        uint64 seq_no)
+                                        uint64 seq_no, bool no_error)
 {
   element *elem;
   bool res= 0;
@@ -1781,9 +1792,10 @@ rpl_binlog_state::check_strict_sequence(uint32 domain_id, uint32 server_id,
                                        sizeof(domain_id))) &&
       elem->last_gtid && elem->last_gtid->seq_no >= seq_no)
   {
-    my_error(ER_GTID_STRICT_OUT_OF_ORDER, MYF(0), domain_id, server_id, seq_no,
-             elem->last_gtid->domain_id, elem->last_gtid->server_id,
-             elem->last_gtid->seq_no);
+    if (!no_error)
+      my_error(ER_GTID_STRICT_OUT_OF_ORDER, MYF(0), domain_id, server_id, seq_no,
+               elem->last_gtid->domain_id, elem->last_gtid->server_id,
+               elem->last_gtid->seq_no);
     res= 1;
   }
   mysql_mutex_unlock(&LOCK_binlog_state);
@@ -3603,12 +3615,9 @@ int Id_delegating_gtid_event_filter<T>::set_id_restrictions(
 
   size_t id_ctr;
   int err;
-  Gtid_event_filter::gtid_event_filter_type filter_type;
   const char *filter_name, *opposite_filter_name;
   Gtid_event_filter *(*construct_filter)(void);
   Gtid_event_filter *(*construct_default_filter)(void);
-
-  DBUG_ASSERT(mode > id_restriction_mode::MODE_NOT_SET);
 
   /*
     Set up variables which help this filter either be in whitelist or blacklist
@@ -3616,7 +3625,6 @@ int Id_delegating_gtid_event_filter<T>::set_id_restrictions(
   */
   if (mode == Gtid_event_filter::id_restriction_mode::WHITELIST_MODE)
   {
-    filter_type= Gtid_event_filter::ACCEPT_ALL_GTID_FILTER_TYPE;
     filter_name= WHITELIST_NAME;
     opposite_filter_name= BLACKLIST_NAME;
     construct_filter=
@@ -3624,19 +3632,16 @@ int Id_delegating_gtid_event_filter<T>::set_id_restrictions(
     construct_default_filter=
         create_event_filter<Reject_all_gtid_filter>;
   }
-  else if (mode == Gtid_event_filter::id_restriction_mode::BLACKLIST_MODE)
+  else
   {
-    filter_type= Gtid_event_filter::REJECT_ALL_GTID_FILTER_TYPE;
+    DBUG_ASSERT(mode ==
+                Gtid_event_filter::id_restriction_mode::BLACKLIST_MODE);
     filter_name= BLACKLIST_NAME;
     opposite_filter_name= WHITELIST_NAME;
     construct_filter=
         create_event_filter<Reject_all_gtid_filter>;
     construct_default_filter=
         create_event_filter<Accept_all_gtid_filter>;
-  }
-  else
-  {
-    DBUG_ASSERT(0);
   }
 
   if (m_id_restriction_mode !=
@@ -3683,7 +3688,10 @@ int Id_delegating_gtid_event_filter<T>::set_id_restrictions(
     else
     {
       DBUG_ASSERT(map_element->filter->get_filter_type() ==
-                  filter_type);
+                  (mode ==
+                   Gtid_event_filter::id_restriction_mode::WHITELIST_MODE
+                   ? Gtid_event_filter::ACCEPT_ALL_GTID_FILTER_TYPE
+                   : Gtid_event_filter::REJECT_ALL_GTID_FILTER_TYPE));
     }
   }
 

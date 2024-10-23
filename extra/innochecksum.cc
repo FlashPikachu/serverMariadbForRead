@@ -771,7 +771,7 @@ parse_page(
 {
 	unsigned long long id;
 	uint16_t undo_page_type;
-	char str[20]={'\0'};
+	const char *str;
 	ulint n_recs;
 	uint32_t page_no, left_page_no, right_page_no;
 	ulint data_bytes;
@@ -779,11 +779,7 @@ parse_page(
 	ulint size_range_id;
 
 	/* Check whether page is doublewrite buffer. */
-	if(skip_page) {
-		strcpy(str, "Double_write_buffer");
-	} else {
-		strcpy(str, "-");
-	}
+	str = skip_page ? "Double_write_buffer" : "-";
 
 	switch (fil_page_get_type(page)) {
 
@@ -1131,11 +1127,15 @@ print_summary(
 	fprintf(fil_out, "index_id\t#pages\t\t#leaf_pages\t#recs_per_page"
 		"\t#bytes_per_page\n");
 
-	for (std::map<unsigned long long, per_index_stats>::const_iterator it = index_ids.begin();
-	     it != index_ids.end(); it++) {
-		const per_index_stats& index = it->second;
+	for (const auto &ids : index_ids) {
+		const per_index_stats& index = ids.second;
+		if (!index.pages) {
+			DBUG_ASSERT(index.free_pages);
+			continue;
+		}
+
 		fprintf(fil_out, "%lld\t\t%lld\t\t%lld\t\t%lld\t\t%lld\n",
-			it->first, index.pages, index.leaf_pages,
+			ids.first, index.pages, index.leaf_pages,
 			index.total_n_recs / index.pages,
 			index.total_data_bytes / index.pages);
 	}

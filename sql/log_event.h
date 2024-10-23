@@ -521,32 +521,15 @@ class String;
   be written to the binlog. OPTIONS_WRITTEN_TO_BIN_LOG could be
   written into the Format_description_log_event, so that if later we
   don't want to replicate a variable we did replicate, or the
-  contrary, it's doable. But it should not be too hard to decide once
-  for all of what we replicate and what we don't, among the fixed 32
-  bits of thd->options.
+  contrary, it's doable. But it should not be too hard to deduct
+  the value of OPTIONS_WRITTEN_TO_BIN_LOG from the master's version.
 
-  I (Guilhem) have read through every option's usage, and it looks
-  like OPTION_AUTO_IS_NULL and OPTION_NO_FOREIGN_KEYS are the only
-  ones which alter how the query modifies the table. It's good to
-  replicate OPTION_RELAXED_UNIQUE_CHECKS too because otherwise, the
-  slave may insert data slower than the master, in InnoDB.
-  OPTION_BIG_SELECTS is not needed (the slave thread runs with
-  max_join_size=HA_POS_ERROR) and OPTION_BIG_TABLES is not needed
-  either, as the manual says (because a too big in-memory temp table
-  is automatically written to disk).
+  This is done in deduct_options_written_to_bin_log().
+  You *must* update it, when changing the definition below.
 */
-#define OPTIONS_WRITTEN_TO_BIN_LOG \
-  (OPTION_AUTO_IS_NULL | OPTION_NO_FOREIGN_KEY_CHECKS |  \
+#define OPTIONS_WRITTEN_TO_BIN_LOG (OPTION_EXPLICIT_DEF_TIMESTAMP |\
+   OPTION_AUTO_IS_NULL | OPTION_NO_FOREIGN_KEY_CHECKS |  \
    OPTION_RELAXED_UNIQUE_CHECKS | OPTION_NOT_AUTOCOMMIT | OPTION_IF_EXISTS)
-
-/* Shouldn't be defined before */
-#define EXPECTED_OPTIONS \
-  ((1ULL << 14) | (1ULL << 26) | (1ULL << 27) | (1ULL << 19) | (1ULL << 28))
-
-#if OPTIONS_WRITTEN_TO_BIN_LOG != EXPECTED_OPTIONS
-#error OPTIONS_WRITTEN_TO_BIN_LOG must NOT change their values!
-#endif
-#undef EXPECTED_OPTIONS         /* You shouldn't use this one */
 
 #define CHECKSUM_CRC32_SIGNATURE_LEN 4
 /**
@@ -746,7 +729,7 @@ enum Log_event_type
 
 
 /*
-  Bit flags for what has been writting to cache. Used to
+  Bit flags for what has been writing to cache. Used to
   discard logs with table map events but not row events and
   nothing else important. This is stored by cache.
 */
@@ -1559,14 +1542,7 @@ public:
 
      @see do_apply_event
    */
-  int apply_event(rpl_group_info *rgi)
-  {
-    int res;
-    THD_STAGE_INFO(thd, stage_apply_event);
-    res= do_apply_event(rgi);
-    THD_STAGE_INFO(thd, stage_after_apply_event);
-    return res;
-  }
+  int apply_event(rpl_group_info *rgi);
 
 
   /**
@@ -1893,10 +1869,7 @@ protected:
     <td>The flags in @c thd->options, binary AND-ed with @c
     OPTIONS_WRITTEN_TO_BIN_LOG.  The @c thd->options bitfield contains
     options for "SELECT".  @c OPTIONS_WRITTEN identifies those options
-    that need to be written to the binlog (not all do).  Specifically,
-    @c OPTIONS_WRITTEN_TO_BIN_LOG equals (@c OPTION_AUTO_IS_NULL | @c
-    OPTION_NO_FOREIGN_KEY_CHECKS | @c OPTION_RELAXED_UNIQUE_CHECKS |
-    @c OPTION_NOT_AUTOCOMMIT), or 0x0c084000 in hex.
+    that need to be written to the binlog (not all do).
 
     These flags correspond to the SQL variables SQL_AUTO_IS_NULL,
     FOREIGN_KEY_CHECKS, UNIQUE_CHECKS, and AUTOCOMMIT, documented in
@@ -2169,7 +2142,7 @@ public:
     flags2==0 (5.0 master, we know this has a meaning of flags all down which
     must influence the query).
   */
-  bool flags2_inited;
+  uint32 flags2_inited;
   bool sql_mode_inited;
   bool charset_inited;
 
@@ -2642,8 +2615,7 @@ public:
   */
   Load_log_event(const uchar *buf, uint event_len,
                  const Format_description_log_event* description_event);
-  ~Load_log_event()
-  {}
+  ~Load_log_event() = default;
   Log_event_type get_type_code()
   {
     return sql_ex.new_format() ? NEW_LOAD_EVENT: LOAD_EVENT;
@@ -2727,13 +2699,13 @@ public:
   void pack_info(Protocol* protocol);
 #endif /* HAVE_REPLICATION */
 #else
-  Start_log_event_v3() {}
+  Start_log_event_v3() = default;
   bool print(FILE* file, PRINT_EVENT_INFO* print_event_info);
 #endif
 
   Start_log_event_v3(const uchar *buf, uint event_len,
                      const Format_description_log_event* description_event);
-  ~Start_log_event_v3() {}
+  ~Start_log_event_v3() = default;
   Log_event_type get_type_code() { return START_EVENT_V3;}
   my_off_t get_header_len(my_off_t l __attribute__((unused)))
   { return LOG_EVENT_MINIMAL_HEADER_LEN; }
@@ -2903,6 +2875,7 @@ public:
   };
   master_version_split server_version_split;
   const uint8 *event_type_permutation;
+  uint32 options_written_to_bin_log;
 
   Format_description_log_event(uint8 binlog_ver, const char* server_ver=0);
   Format_description_log_event(const uchar *buf, uint event_len,
@@ -2950,6 +2923,7 @@ public:
   }
 
   void calc_server_version_split();
+  void deduct_options_written_to_bin_log();
   static bool is_version_before_checksum(const master_version_split *version_split);
 protected:
 #if defined(MYSQL_SERVER) && defined(HAVE_REPLICATION)
@@ -3021,7 +2995,7 @@ Intvar_log_event(THD* thd_arg,uchar type_arg, ulonglong val_arg,
 
   Intvar_log_event(const uchar *buf,
                    const Format_description_log_event *description_event);
-  ~Intvar_log_event() {}
+  ~Intvar_log_event() = default;
   Log_event_type get_type_code() { return INTVAR_EVENT;}
   const char* get_var_type_name();
   int get_data_size() { return  9; /* sizeof(type) + sizeof(val) */;}
@@ -3102,7 +3076,7 @@ class Rand_log_event: public Log_event
 
   Rand_log_event(const uchar *buf,
                  const Format_description_log_event *description_event);
-  ~Rand_log_event() {}
+  ~Rand_log_event() = default;
   Log_event_type get_type_code() { return RAND_EVENT;}
   int get_data_size() { return 16; /* sizeof(ulonglong) * 2*/ }
 #ifdef MYSQL_SERVER
@@ -3138,7 +3112,7 @@ private:
   virtual int do_commit()= 0;
   virtual int do_apply_event(rpl_group_info *rgi);
   int do_record_gtid(THD *thd, rpl_group_info *rgi, bool in_trans,
-                     void **out_hton);
+                     void **out_hton, bool force_err= false);
   enum_skip_reason do_shall_skip(rpl_group_info *rgi);
   virtual const char* get_query()= 0;
 #endif
@@ -3182,7 +3156,7 @@ public:
 
   Xid_log_event(const uchar *buf,
                 const Format_description_log_event *description_event);
-  ~Xid_log_event() {}
+  ~Xid_log_event() = default;
   Log_event_type get_type_code() { return XID_EVENT;}
   int get_data_size() { return sizeof(xid); }
 #ifdef MYSQL_SERVER
@@ -3402,7 +3376,7 @@ public:
 
   User_var_log_event(const uchar *buf, uint event_len,
                      const Format_description_log_event *description_event);
-  ~User_var_log_event() {}
+  ~User_var_log_event() = default;
   Log_event_type get_type_code() { return USER_VAR_EVENT;}
 #ifdef MYSQL_SERVER
   bool write();
@@ -3452,7 +3426,7 @@ public:
                  const Format_description_log_event *description_event):
     Log_event(buf, description_event)
   {}
-  ~Stop_log_event() {}
+  ~Stop_log_event() = default;
   Log_event_type get_type_code() { return STOP_EVENT;}
   bool is_valid() const { return 1; }
 
@@ -3747,7 +3721,7 @@ public:
 #endif
   Gtid_log_event(const uchar *buf, uint event_len,
                  const Format_description_log_event *description_event);
-  ~Gtid_log_event() { }
+  ~Gtid_log_event() = default;
   Log_event_type get_type_code() { return GTID_EVENT; }
   enum_logged_status logged_status() { return LOGGED_NO_DATA; }
   int get_data_size()
@@ -4000,7 +3974,7 @@ public:
   Append_block_log_event(const uchar *buf, uint event_len,
                          const Format_description_log_event
                          *description_event);
-  ~Append_block_log_event() {}
+  ~Append_block_log_event() = default;
   Log_event_type get_type_code() { return APPEND_BLOCK_EVENT;}
   int get_data_size() { return  block_len + APPEND_BLOCK_HEADER_LEN ;}
   bool is_valid() const { return block != 0; }
@@ -4041,7 +4015,7 @@ public:
 
   Delete_file_log_event(const uchar *buf, uint event_len,
                         const Format_description_log_event* description_event);
-  ~Delete_file_log_event() {}
+  ~Delete_file_log_event() = default;
   Log_event_type get_type_code() { return DELETE_FILE_EVENT;}
   int get_data_size() { return DELETE_FILE_HEADER_LEN ;}
   bool is_valid() const { return file_id != 0; }
@@ -4081,7 +4055,7 @@ public:
   Execute_load_log_event(const uchar *buf, uint event_len,
                          const Format_description_log_event
                          *description_event);
-  ~Execute_load_log_event() {}
+  ~Execute_load_log_event() = default;
   Log_event_type get_type_code() { return EXEC_LOAD_EVENT;}
   int get_data_size() { return  EXEC_LOAD_HEADER_LEN ;}
   bool is_valid() const { return file_id != 0; }
@@ -4121,7 +4095,7 @@ public:
   Begin_load_query_log_event(const uchar *buf, uint event_len,
                              const Format_description_log_event
                              *description_event);
-  ~Begin_load_query_log_event() {}
+  ~Begin_load_query_log_event() = default;
   Log_event_type get_type_code() { return BEGIN_LOAD_QUERY_EVENT; }
 private:
 #if defined(MYSQL_SERVER) && defined(HAVE_REPLICATION)
@@ -4179,7 +4153,7 @@ public:
   Execute_load_query_log_event(const uchar *buf, uint event_len,
                                const Format_description_log_event
                                *description_event);
-  ~Execute_load_query_log_event() {}
+  ~Execute_load_query_log_event() = default;
 
   Log_event_type get_type_code() { return EXECUTE_LOAD_QUERY_EVENT; }
   bool is_valid() const { return Query_log_event::is_valid() && file_id != 0; }
@@ -4217,7 +4191,7 @@ public:
   {}
   /* constructor for hopelessly corrupted events */
   Unknown_log_event(): Log_event(), what(ENCRYPTED) {}
-  ~Unknown_log_event() {}
+  ~Unknown_log_event() = default;
   bool print(FILE* file, PRINT_EVENT_INFO* print_event_info);
   Log_event_type get_type_code() { return UNKNOWN_EVENT;}
   bool is_valid() const { return 1; }
@@ -5279,6 +5253,51 @@ protected:
   KEY      *m_key_info; /* Pointer to KEY info for m_key_nr */
   uint      m_key_nr;   /* Key number */
   bool master_had_triggers;     /* set after tables opening */
+
+  /*
+    RAII helper class to automatically handle the override/restore of thd->db
+    when applying row events, so it will be visible in SHOW PROCESSLIST.
+
+    If triggers will be invoked, their logic frees the current thread's db,
+    so we use set_db() to use a copy of the table share's database.
+
+    If not using triggers, the db is never freed, and we can reference the
+    same memory owned by the table share.
+  */
+  class Db_restore_ctx
+  {
+  private:
+    THD *thd;
+    LEX_CSTRING restore_db;
+    bool db_copied;
+
+    Db_restore_ctx(Rows_log_event *rev)
+        : thd(rev->thd), restore_db(rev->thd->db)
+    {
+      TABLE *table= rev->m_table;
+
+      if (table->triggers && rev->do_invoke_trigger())
+      {
+        thd->reset_db(&null_clex_str);
+        thd->set_db(&table->s->db);
+        db_copied= true;
+      }
+      else
+      {
+        thd->reset_db(&table->s->db);
+        db_copied= false;
+      }
+    }
+
+    ~Db_restore_ctx()
+    {
+      if (db_copied)
+        thd->set_db(&null_clex_str);
+      thd->reset_db(&restore_db);
+    }
+
+    friend class Rows_log_event;
+  };
 
   int find_key(); // Find a best key to use in find_row()
   int find_row(rpl_group_info *);

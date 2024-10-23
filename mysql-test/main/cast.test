@@ -2,6 +2,10 @@
 # Test of cast function
 #
 
+#remove this include after fix MDEV-27871
+# discuss what to do with "set names binary"
+--source include/no_view_protocol.inc
+
 # For TIME->DATETIME conversion
 SET timestamp=unix_timestamp('2001-02-03 10:20:30');
 
@@ -398,9 +402,11 @@ SET @@GLOBAL.max_allowed_packet=2048;
 # reconnect to make the new max packet size take effect
 --connect (newconn, localhost, root,,)
 
+--disable_ps2_protocol
 SELECT CONVERT('a', BINARY(2049));  
 SELECT CONVERT('a', CHAR(2049));  
 SELECT length(CONVERT(repeat('a',2048), CHAR(2049)));
+--enable_ps2_protocol
 
 connection default;
 disconnect newconn;

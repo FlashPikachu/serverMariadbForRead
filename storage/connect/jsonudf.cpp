@@ -161,7 +161,7 @@ my_bool JSNX::SetArrayOptions(PGLOBAL g, char *p, int i, PSZ nm)
 		jnp->Rank = atoi(p) - B;
 		jnp->Op = OP_EQ;
 	} else if (Wr) {
-		sprintf(g->Message, "Invalid specification %s in a write path", p);
+		snprintf(g->Message, sizeof(g->Message), "Invalid specification %s in a write path", p);
 		return true;
 	} else if (n == 1) {
 		// Set the Op value;
@@ -173,10 +173,10 @@ my_bool JSNX::SetArrayOptions(PGLOBAL g, char *p, int i, PSZ nm)
 		case '!': jnp->Op = OP_SEP;  break; // Average
 		case '#': jnp->Op = OP_NUM;  break;
 		case '*': // Expand this array
-			strcpy(g->Message, "Expand not supported by this function");
+			snprintf(g->Message, sizeof(g->Message), "Expand not supported by this function");
 			return true;
 		default:
-			sprintf(g->Message, "Invalid function specification %c", *p);
+			snprintf(g->Message, sizeof(g->Message), "Invalid function specification %c", *p);
 			return true;
 		} // endswitch *p
 
@@ -195,7 +195,7 @@ my_bool JSNX::SetArrayOptions(PGLOBAL g, char *p, int i, PSZ nm)
 		} // endif n
 
 	} else {
-		strcpy(g->Message, "Wrong array specification");
+		snprintf(g->Message, sizeof(g->Message), "Wrong array specification");
 		return true;
 	} // endif's
 
@@ -268,7 +268,7 @@ my_bool JSNX::ParseJpath(PGLOBAL g)
 
 		} else if (*p == '*') {
 			if (Wr) {
-				sprintf(g->Message, "Invalid specification %c in a write path", *p);
+				snprintf(g->Message, sizeof(g->Message), "Invalid specification %c in a write path", *p);
 				return true;
 			}	else     			// Return JSON
 				Nodes[i].Op = OP_XX;
@@ -356,10 +356,10 @@ PJVAL JSNX::MakeJson(PGLOBAL g, PJSON jsp, int n)
 	Jb = false;
 
 	if (Value->IsTypeNum()) {
-		strcpy(g->Message, "Cannot make Json for a numeric value");
+		snprintf(g->Message, sizeof(g->Message), "Cannot make Json for a numeric value");
 		return NULL;
 	} else if (jsp->GetType() != TYPE_JAR && jsp->GetType() != TYPE_JOB) {
-		strcpy(g->Message, "Target is not an array or object");
+		snprintf(g->Message, sizeof(g->Message), "Target is not an array or object");
 		return NULL;
 	}	else 	if (n < Nod -1) {
 		if (jsp->GetType() == TYPE_JAR) {
@@ -448,7 +448,7 @@ PJVAL JSNX::GetRowValue(PGLOBAL g, PJSON row, int i, my_bool b)
 							val = new(g)JVALUE(row);
 
 					} else {
-						strcpy(g->Message, "Unexpected object");
+						snprintf(g->Message, sizeof(g->Message), "Unexpected object");
 						val = NULL;
 					} //endif Op
 
@@ -478,7 +478,7 @@ PJVAL JSNX::GetRowValue(PGLOBAL g, PJSON row, int i, my_bool b)
 				val = (PJVAL)row;
 				break;
 			default:
-				sprintf(g->Message, "Invalid row JSON type %d", row->GetType());
+				snprintf(g->Message, sizeof(g->Message), "Invalid row JSON type %d", row->GetType());
 				val = NULL;
 			} // endswitch Type
 
@@ -498,7 +498,7 @@ PJVAL JSNX::GetRowValue(PGLOBAL g, PJSON row, int i, my_bool b)
 /*********************************************************************************/
 PVAL JSNX::ExpandArray(PGLOBAL g, PJAR arp, int n)
 {
-	strcpy(g->Message, "Expand cannot be done by this function");
+	snprintf(g->Message, sizeof(g->Message), "Expand cannot be done by this function");
 	return NULL;
 } // end of ExpandArray
 
@@ -709,7 +709,7 @@ my_bool JSNX::CheckPath(PGLOBAL g)
 			val = (PJVAL)row;
 			break;
 		default:
-			sprintf(g->Message, "Invalid row JSON type %d", row->GetType());
+			snprintf(g->Message, sizeof(g->Message), "Invalid row JSON type %d", row->GetType());
 		} // endswitch Type
 
 		if (i < Nod-1)
@@ -761,7 +761,7 @@ PJSON JSNX::GetRow(PGLOBAL g)
 			val = (PJVAL)row;
 			break;
 		default:
-			sprintf(g->Message, "Invalid row JSON type %d", row->GetType());
+			snprintf(g->Message, sizeof(g->Message), "Invalid row JSON type %d", row->GetType());
 			val = NULL;
 		} // endswitch Type
 
@@ -784,7 +784,7 @@ PJSON JSNX::GetRow(PGLOBAL g)
 					((PJAR)row)->AddArrayValue(g, new(g)JVALUE(nwr));
 					((PJAR)row)->InitArray(g);
 				} else {
-					strcpy(g->Message, "Wrong type when writing new row");
+					snprintf(g->Message, sizeof(g->Message), "Wrong type when writing new row");
 					nwr = NULL;
 				} // endif's
 
@@ -817,7 +817,7 @@ my_bool JSNX::WriteValue(PGLOBAL g, PJVAL jvalp)
 	case TYPE_JAR:  arp  = (PJAR)row;  break;
 	case TYPE_JVAL: jvp  = (PJVAL)row; break;
 	default: 
-		strcpy(g->Message, "Invalid target type");
+		snprintf(g->Message, sizeof(g->Message), "Invalid target type");
 		return true;
 	} // endswitch Type
 
@@ -852,7 +852,7 @@ PSZ JSNX::Locate(PGLOBAL g, PJSON jsp, PJVAL jvp, int k)
 	g->Message[0] = 0;
 
 	if (!jsp) {
-		strcpy(g->Message, "Null json tree");
+		snprintf(g->Message, sizeof(g->Message), "Null json tree");
 		return NULL;
 	} // endif jsp
 
@@ -879,7 +879,7 @@ PSZ JSNX::Locate(PGLOBAL g, PJSON jsp, PJVAL jvp, int k)
 
 		if (err) {
 			if (!g->Message[0])
-				strcpy(g->Message, "Invalid json tree");
+				snprintf(g->Message, sizeof(g->Message), "Invalid json tree");
 
 		} else if (Found) {
 			Jp->WriteChr('\0');
@@ -893,7 +893,7 @@ PSZ JSNX::Locate(PGLOBAL g, PJSON jsp, PJVAL jvp, int k)
 
 		PUSH_WARNING(g->Message);
 	} catch (const char *msg) {
-		strcpy(g->Message, msg);
+		snprintf(g->Message, sizeof(g->Message), "%s", msg);
 	} // end catch
 
 	return str;
@@ -909,7 +909,7 @@ my_bool JSNX::LocateArray(PGLOBAL g, PJAR jarp)
 
 	for (int i = 0; i < jarp->size() && !Found; i++) {
 		Jp->N = m;
-		sprintf(s, "[%d]", i + B);
+		snprintf(s, sizeof(s), "[%d]", i + B);
 
 		if (Jp->WriteStr(s))
 			return true;
@@ -973,7 +973,7 @@ PSZ JSNX::LocateAll(PGLOBAL g, PJSON jsp, PJVAL jvp, int mx)
 	PJPN    jnp;
 	
 	if (!jsp) {
-		strcpy(g->Message, "Null json tree");
+		snprintf(g->Message, sizeof(g->Message), "Null json tree");
 		return NULL;
 	} // endif jsp
 
@@ -1012,7 +1012,7 @@ PSZ JSNX::LocateAll(PGLOBAL g, PJSON jsp, PJVAL jvp, int mx)
 			PlugSubAlloc(g, NULL, Jp->N);
 			str = Jp->Strp;
 		} else if (!g->Message[0])
-			strcpy(g->Message, "Invalid json tree");
+			snprintf(g->Message, sizeof(g->Message), "Invalid json tree");
 
 	} catch (int n) {
 		if (trace(1))
@@ -1020,7 +1020,7 @@ PSZ JSNX::LocateAll(PGLOBAL g, PJSON jsp, PJVAL jvp, int mx)
 
 		PUSH_WARNING(g->Message);
 	} catch (const char *msg) {
-		strcpy(g->Message, msg);
+		snprintf(g->Message, sizeof(g->Message), "%s", msg);
 	} // end catch
 
 	return str;
@@ -1190,7 +1190,7 @@ my_bool JSNX::AddPath(void) {
 
 	for (int i = 0; i <= I; i++) {
 		if (Jpnp[i].Type == TYPE_JAR) {
-			sprintf(s, "[%d]", Jpnp[i].N + B);
+			snprintf(s, sizeof(s), "[%d]", Jpnp[i].N + B);
 
 			if (Jp->WriteStr(s))
 				return true;
@@ -1398,12 +1398,12 @@ static my_bool CheckPath(PGLOBAL g, UDF_ARGS *args, PJSON jsp, PJVAL& jvp, int n
 					return true;
 
 				if (!(jvp = jsx->GetJson(g))) {
-					sprintf(g->Message, "No sub-item at '%s'", path);
+					snprintf(g->Message, sizeof(g->Message), "No sub-item at '%s'", path);
 					return true;
 				} // endif jvp
 
 			} else {
-				strcpy(g->Message, "Path argument is null");
+				snprintf(g->Message, sizeof(g->Message), "Path argument is null");
 				return true;
 			} // endif path
 
@@ -1751,7 +1751,7 @@ my_bool CheckMemory(PGLOBAL g, UDF_INIT *initid, UDF_ARGS *args, uint n,
 					char errmsg[MAX_STR];
 
 					snprintf(errmsg, sizeof(errmsg) - 1, MSG(WORK_AREA), g->Message);
-					strcpy(g->Message, errmsg);
+					snprintf(g->Message, sizeof(g->Message), "%s", errmsg);
 					return true;
 					} // endif SareaAlloc
 
@@ -1816,7 +1816,7 @@ static PCSZ MakeKey(PGLOBAL g, UDF_ARGS *args, int i)
 			} // endif *s
 
 			if (n < 1)
-                                return (PCSZ) "Key";
+        return (PCSZ) "Key";
 
 			if (!b) {
 				if ((p = (PSZ)PlgDBSubAlloc(g, NULL, n + 1))) {
@@ -1830,7 +1830,7 @@ static PCSZ MakeKey(PGLOBAL g, UDF_ARGS *args, int i)
 
 		} // endif s
 
-		return (char*) s;
+		return s;
 	} // endif count
 
   return (PCSZ) "Key";
@@ -1855,7 +1855,7 @@ static PJSON ParseJsonFile(PGLOBAL g, char *fn, int *pretty, size_t& len)
 		DWORD rc = GetLastError();
 
 		if (!(*g->Message))
-			sprintf(g->Message, MSG(OPEN_MODE_ERROR), "map", (int)rc, fn);
+			snprintf(g->Message, sizeof(g->Message), MSG(OPEN_MODE_ERROR), "map", (int)rc, fn);
 
 		return NULL;
 	} // endif hFile
@@ -1877,7 +1877,7 @@ static PJSON ParseJsonFile(PGLOBAL g, char *fn, int *pretty, size_t& len)
 
 	if (!memory) {
 		CloseFileHandle(hFile);
-		sprintf(g->Message, MSG(MAP_VIEW_ERROR), fn, GetLastError());
+		snprintf(g->Message, sizeof(g->Message), MSG(MAP_VIEW_ERROR), fn, GetLastError());
 		return NULL;
 	} // endif Memory
 
@@ -1907,19 +1907,19 @@ char *GetJsonFile(PGLOBAL g, char *fn)
 #endif
 
 	if (h == -1) {
-		sprintf(g->Message, "Error %d opening %-.1024s", errno, fn);
+		snprintf(g->Message, sizeof(g->Message), "Error %d opening %-.1024s", errno, fn);
 		return NULL;
 	} // endif h
 
 	if ((len = _filelength(h)) < 0) {
-		sprintf(g->Message, MSG(FILELEN_ERROR), "_filelength", fn);
+		snprintf(g->Message, sizeof(g->Message), MSG(FILELEN_ERROR), "_filelength", fn);
 		close(h);
 		return NULL;
 	} // endif len
 
 	if ((str = (char*)PlgDBSubAlloc(g, NULL, len + 1))) {
 		if ((n = read(h, str, len)) < 0) {
-			sprintf(g->Message, "Error %d reading %d bytes from %-.1024s", errno, len, fn);
+			snprintf(g->Message, sizeof(g->Message), "Error %d reading %d bytes from %-.1024s", errno, len, fn);
 			return NULL;
 		} // endif n
 
@@ -3373,7 +3373,7 @@ char *json_item_merge(UDF_INIT *initid, UDF_ARGS *args, char *result,
 			if (!i) top = jvp->GetJson();
 
 			if (jvp->GetValType() != TYPE_JAR && jvp->GetValType() != TYPE_JOB) {
-				sprintf(g->Message, "Argument %d is not an array or object", i);
+				snprintf(g->Message, sizeof(g->Message), "Argument %d is not an array or object", i);
 				PUSH_WARNING(g->Message);
 			} else
 				jsp[i] = jvp->GetJsp();
@@ -3621,7 +3621,7 @@ char *jsonget_string(UDF_INIT *initid, UDF_ARGS *args, char *result,
 		PUSH_WARNING(g->Message);
 		str = NULL;
 	} catch (const char *msg) {
-	  strcpy(g->Message, msg);
+	  snprintf(g->Message, sizeof(g->Message), "%s", msg);
 		PUSH_WARNING(g->Message);
 		str = NULL;
   } // end catch
@@ -3981,7 +3981,7 @@ char *jsonlocate(UDF_INIT *initid, UDF_ARGS *args, char *result,
 		*error = 1;
 		path = NULL;
 	} catch (const char *msg) {
-		strcpy(g->Message, msg);
+		snprintf(g->Message, sizeof(g->Message), "%s", msg);
 		PUSH_WARNING(g->Message);
 		*error = 1;
 		path = NULL;
@@ -4107,7 +4107,7 @@ char *json_locate_all(UDF_INIT *initid, UDF_ARGS *args, char *result,
 		*error = 1;
 		path = NULL;
   } catch (const char *msg) {
-		strcpy(g->Message, msg);
+		snprintf(g->Message, sizeof(g->Message), "%s", msg);
 		PUSH_WARNING(g->Message);
 		*error = 1;
 		path = NULL;
@@ -4380,7 +4380,7 @@ char *handle_item(UDF_INIT *initid, UDF_ARGS *args, char *result,
 		PUSH_WARNING(g->Message);
 		str = NULL;
 	} catch (const char *msg) {
-	  strcpy(g->Message, msg);
+	  snprintf(g->Message, sizeof(g->Message), "%s", msg);
 		PUSH_WARNING(g->Message);
 		str = NULL;
 	} // end catch
@@ -4756,7 +4756,7 @@ char *jbin_array(UDF_INIT *initid, UDF_ARGS *args, char *result,
 
 			if ((arp = (PJAR)JsonNew(g, TYPE_JAR)) &&
 					(bsp = JbinAlloc(g, args, initid->max_length, arp))) {
-				strcat(bsp->Msg, " array");
+				safe_strcat(bsp->Msg, sizeof(bsp->Msg), " array");
 
 				for (uint i = 0; i < args->arg_count; i++)
 					arp->AddArrayValue(g, MakeValue(g, args, i));
@@ -4833,7 +4833,7 @@ char *jbin_array_add_values(UDF_INIT *initid, UDF_ARGS *args, char *result,
 			arp->InitArray(gb);
 
 			if ((bsp = JbinAlloc(g, args, initid->max_length, top))) {
-				strcat(bsp->Msg, " array");
+				safe_strcat(bsp->Msg, sizeof(bsp->Msg), " array");
 				bsp->Jsp = arp;
 			}	// endif bsp
 
@@ -5054,7 +5054,7 @@ char *jbin_object(UDF_INIT *initid, UDF_ARGS *args, char *result,
 
 
 				if ((bsp = JbinAlloc(g, args, initid->max_length, objp)))
-					strcat(bsp->Msg, " object");
+					safe_strcat(bsp->Msg, sizeof(bsp->Msg), " object");
 
 			} else
 				bsp = NULL;
@@ -5110,7 +5110,7 @@ char *jbin_object_nonull(UDF_INIT *initid, UDF_ARGS *args, char *result,
 						objp->SetKeyValue(g, jvp, MakeKey(g, args, i));
 
 				if ((bsp = JbinAlloc(g, args, initid->max_length, objp)))
-					strcat(bsp->Msg, " object");
+					safe_strcat(bsp->Msg, sizeof(bsp->Msg), " object");
 
 			} else
 				bsp = NULL;
@@ -5169,7 +5169,7 @@ char *jbin_object_key(UDF_INIT *initid, UDF_ARGS *args, char *result,
 					objp->SetKeyValue(g, MakeValue(g, args, i + 1), MakePSZ(g, args, i));
 
 				if ((bsp = JbinAlloc(g, args, initid->max_length, objp)))
-					strcat(bsp->Msg, " object");
+					safe_strcat(bsp->Msg, sizeof(bsp->Msg), " object");
 
 			} else
 				bsp = NULL;
@@ -5391,7 +5391,7 @@ char *jbin_object_list(UDF_INIT *initid, UDF_ARGS *args, char *result,
 		} // endif CheckMemory
 
 		if ((bsp = JbinAlloc(g, args, initid->max_length, jarp)))
-			strcat(bsp->Msg, " array");
+			safe_strcat(bsp->Msg, sizeof(bsp->Msg), " array");
 
 		// Keep result of constant function
 		g->Xchk = (initid->const_item) ? bsp : NULL;
@@ -5466,7 +5466,7 @@ char *jbin_get_item(UDF_INIT *initid, UDF_ARGS *args, char *result,
 		jsp = (jvp->GetJsp()) ? jvp->GetJsp() : JvalNew(g, TYPE_JVAL, jvp->GetValue(g));
 
 		if ((bsp = JbinAlloc(g, args, initid->max_length, jsp)))
-			strcat(bsp->Msg, " item");
+			safe_strcat(bsp->Msg, sizeof(bsp->Msg), " item");
 		else
 			*error = 1;
 
@@ -5536,7 +5536,7 @@ char *jbin_item_merge(UDF_INIT *initid, UDF_ARGS *args, char *result,
 			if (!i) top = jvp->GetJson();
 
 			if (jvp->GetValType() != TYPE_JAR && jvp->GetValType() != TYPE_JOB) {
-				sprintf(g->Message, "Argument %d is not an array or object", i);
+				snprintf(g->Message, sizeof(g->Message), "Argument %d is not an array or object", i);
 				PUSH_WARNING(g->Message);
 			} else
 				jsp[i] = jvp->GetJsp();
@@ -5826,7 +5826,7 @@ char *jbin_file(UDF_INIT *initid, UDF_ARGS *args, char *result,
 		pretty = pty;
 
 	if ((bsp = JbinAlloc(g, args, len, jsp))) {
-		strcat(bsp->Msg, " file");
+		safe_strcat(bsp->Msg, sizeof(bsp->Msg), " file");
 		bsp->Filename = fn;
 		bsp->Pretty = pretty;
 	} else {
@@ -6034,7 +6034,7 @@ char *jfile_bjson(UDF_INIT *initid, UDF_ARGS *args, char *result,
 
 					if (!fgets(buf, lrecl, fin)) {
 						if (!feof(fin)) {
-							sprintf(g->Message, "Error %d reading %zd bytes from %s", errno, lrecl, fn);
+							snprintf(g->Message, sizeof(g->Message), "Error %d reading %zu bytes from %s", errno, lrecl, fn);
 							str = strcpy(result, g->Message);
 						}	else
 							str = strcpy(result, ofn);
@@ -6048,11 +6048,11 @@ char *jfile_bjson(UDF_INIT *initid, UDF_ARGS *args, char *result,
 							swp->SwapJson(jsp, true);
 
 							if (fwrite(binszp, sizeof(binszp), 1, fout) != 1) {
-								sprintf(g->Message, "Error %d writing %zd bytes to %s", 
+								snprintf(g->Message, sizeof(g->Message), "Error %d writing %zu bytes to %s",
 																		errno, sizeof(binszp), ofn);
 								str = strcpy(result, g->Message);
 							} else if (fwrite(jsp, *binszp, 1, fout) != 1) {
-								sprintf(g->Message, "Error %d writing %zd bytes to %s", 
+								snprintf(g->Message, sizeof(g->Message), "Error %d writing %zu bytes to %s",
 																		errno, *binszp, ofn);
 								str = strcpy(result, g->Message);
 							} else
@@ -6130,7 +6130,7 @@ char* JUP::UnprettyJsonFile(PGLOBAL g, char *fn, char *outfn, int lrecl) {
 		DWORD rc = GetLastError();
 
 		if (!(*g->Message))
-			sprintf(g->Message, MSG(OPEN_MODE_ERROR), "map", (int)rc, fn);
+			snprintf(g->Message, sizeof(g->Message), MSG(OPEN_MODE_ERROR), "map", (int)rc, fn);
 
 		return NULL;
 	} // endif hFile
@@ -6151,7 +6151,7 @@ char* JUP::UnprettyJsonFile(PGLOBAL g, char *fn, char *outfn, int lrecl) {
 
 	if (!mm.memory) {
 		CloseFileHandle(hFile);
-		sprintf(g->Message, MSG(MAP_VIEW_ERROR), fn, GetLastError());
+		snprintf(g->Message, sizeof(g->Message), MSG(MAP_VIEW_ERROR), fn, GetLastError());
 		return NULL;
 	} else
 		s = (char*)mm.memory;
@@ -6162,9 +6162,8 @@ char* JUP::UnprettyJsonFile(PGLOBAL g, char *fn, char *outfn, int lrecl) {
 	/*  Parse the json file and allocate its tree structure.                         */
 	/*********************************************************************************/
 	if (!(fs = fopen(outfn, "wb"))) {
-		sprintf(g->Message, MSG(OPEN_MODE_ERROR),
-			"w", (int)errno, outfn);
-		strcat(strcat(g->Message, ": "), strerror(errno));
+		snprintf(g->Message, sizeof(g->Message), MSG(OPEN_MODE_ERROR)": %s",
+			"w", (int)errno, outfn, strerror(errno));
 		CloseMemMap(mm.memory, len);
 		return NULL;
 	} // endif fs
@@ -6189,7 +6188,7 @@ bool JUP::unPretty(PGLOBAL g, int lrecl) {
 		htrc("UnPretty: s=%.10s len=%zd lrecl=%d\n", s, len, lrecl);
 
 	if (!s || !len) {
-		strcpy(g->Message, "Void JSON file");
+		snprintf(g->Message, sizeof(g->Message), "Void JSON file");
 		return true;
 	} else if (*s != '[') {
 		// strcpy(g->Message, "JSON file is not an array");
@@ -6227,7 +6226,7 @@ bool JUP::unPretty(PGLOBAL g, int lrecl) {
 					go = next = false;
 					break;
 				default:
-					sprintf(g->Message, "Unexpected '%c' near %.*s", s[i], ARGS);
+					snprintf(g->Message, sizeof(g->Message), "Unexpected '%c' near %.*s", s[i], ARGS);
 					throw 4;
 					break;
 				}; // endswitch s[i]
@@ -6240,7 +6239,7 @@ bool JUP::unPretty(PGLOBAL g, int lrecl) {
 			buff[k] = 0;
 
 			if ((fputs(buff, fs)) == EOF) {
-				sprintf(g->Message, MSG(FPUTS_ERROR), strerror(errno));
+				snprintf(g->Message, sizeof(g->Message), MSG(FPUTS_ERROR), strerror(errno));
 				throw 5;
 			} // endif EOF
 
@@ -6252,7 +6251,7 @@ bool JUP::unPretty(PGLOBAL g, int lrecl) {
 			htrc("Exception %d: %s\n", n, g->Message);
 		rc = true;
 	} catch (const char* msg) {
-		strcpy(g->Message, msg);
+		snprintf(g->Message, sizeof(g->Message), "%s", msg);
 		rc = true;
 	} // end catch
 
@@ -6274,7 +6273,7 @@ void JUP::CopyObject(PGLOBAL g) {
 				CopyString(g);
 				level = 1;
 			} else {
-				sprintf(g->Message, "misplaced string near %.*s", ARGS);
+				snprintf(g->Message, sizeof(g->Message), "misplaced string near %.*s", ARGS);
 				throw 3;
 			} // endif level
 
@@ -6286,7 +6285,7 @@ void JUP::CopyObject(PGLOBAL g) {
 				CopyValue(g);
 				level = 2;
 			} else {
-				sprintf(g->Message, "Unexpected ':' near %.*s", ARGS);
+				snprintf(g->Message, sizeof(g->Message), "Unexpected ':' near %.*s", ARGS);
 				throw 3;
 			} // endif level
 
@@ -6295,7 +6294,7 @@ void JUP::CopyObject(PGLOBAL g) {
 			AddBuff(s[i]);
 
 			if (level < 2) {
-				sprintf(g->Message, "Unexpected ',' near %.*s", ARGS);
+				snprintf(g->Message, sizeof(g->Message), "Unexpected ',' near %.*s", ARGS);
 				throw 3;
 			} else
 				level = 0;
@@ -6305,7 +6304,7 @@ void JUP::CopyObject(PGLOBAL g) {
 			AddBuff(s[i]);
 
 			if (level == 1) {
-				sprintf(g->Message, "Unexpected '}' near %.*s", ARGS);
+				snprintf(g->Message, sizeof(g->Message), "Unexpected '}' near %.*s", ARGS);
 				throw 3;
 			} // endif level
 
@@ -6316,7 +6315,7 @@ void JUP::CopyObject(PGLOBAL g) {
 		case '\t':
 			break;
 		default:
-			sprintf(g->Message, "Unexpected character '%c' near %.*s", s[i], ARGS);
+			snprintf(g->Message, sizeof(g->Message), "Unexpected character '%c' near %.*s", s[i], ARGS);
 			throw 3;
 		}; // endswitch s[i]
 
@@ -6333,7 +6332,7 @@ void JUP::CopyArray(PGLOBAL g) {
 		switch (s[i]) {
 		case ',':
 			if (level < 2) {
-				sprintf(g->Message, "Unexpected ',' near %.*s", ARGS);
+				snprintf(g->Message, sizeof(g->Message), "Unexpected ',' near %.*s", ARGS);
 				throw 2;
 			} else
 				level = 1;
@@ -6342,7 +6341,7 @@ void JUP::CopyArray(PGLOBAL g) {
 			break;
 		case ']':
 			if (level == 1) {
-				sprintf(g->Message, "Unexpected ',]' near %.*s", ARGS);
+				snprintf(g->Message, sizeof(g->Message), "Unexpected ',]' near %.*s", ARGS);
 				throw 2;
 			} // endif level
 
@@ -6355,7 +6354,7 @@ void JUP::CopyArray(PGLOBAL g) {
 			break;
 		default:
 			if (level == 2) {
-				sprintf(g->Message, "Unexpected value near %.*s", ARGS);
+				snprintf(g->Message, sizeof(g->Message), "Unexpected value near %.*s", ARGS);
 				throw 2;
 			} // endif level
 
@@ -6438,7 +6437,7 @@ suite:
 	return;
 
 err:
-	sprintf(g->Message, "Unexpected character '%c' near %.*s", s[i], ARGS);
+	snprintf(g->Message, sizeof(g->Message), "Unexpected character '%c' near %.*s", s[i], ARGS);
 	throw 1;
 } // end of CopyValue
 

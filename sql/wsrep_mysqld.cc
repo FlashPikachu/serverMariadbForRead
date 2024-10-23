@@ -52,6 +52,7 @@
 #include "log_event.h"
 #include "sql_connect.h"
 #include "thread_cache.h"
+#include "debug_sync.h"
 
 #include <sstream>
 
@@ -127,6 +128,7 @@ ulong wsrep_trx_fragment_unit= WSREP_FRAG_BYTES;
 ulong wsrep_SR_store_type= WSREP_SR_STORE_TABLE;
 uint  wsrep_ignore_apply_errors= 0;
 
+std::atomic <bool> wsrep_thread_create_failed;
 
 /*
  * End configuration options
@@ -363,10 +365,12 @@ static void wsrep_log_cb(wsrep::log::level level,
 void wsrep_init_gtid()
 {
   wsrep_server_gtid_t stored_gtid= wsrep_get_SE_checkpoint<wsrep_server_gtid_t>();
+  // Domain id may have changed, use the one
+  // received during state transfer.
+  stored_gtid.domain_id= wsrep_gtid_server.domain_id;
   if (stored_gtid.server_id == 0)
   {
     rpl_gtid wsrep_last_gtid;
-    stored_gtid.domain_id= wsrep_gtid_server.domain_id;
     if (mysql_bin_log.is_open() &&
         mysql_bin_log.lookup_domain_in_binlog_state(stored_gtid.domain_id,
                                                     &wsrep_last_gtid))
@@ -471,19 +475,20 @@ void wsrep_recover_sr_from_storage(THD *orig_thd)
     if (!wsrep_schema)
     {
       WSREP_ERROR("Wsrep schema not initialized when trying to recover "
-                  "streaming transactions");
-      unireg_abort(1);
+                  "streaming transactions: wsrep_on %d", WSREP_ON);
+      trans_commit(orig_thd);
     }
     if (wsrep_schema->recover_sr_transactions(orig_thd))
     {
-      WSREP_ERROR("Failed to recover SR transactions from schema");
-      unireg_abort(1);
+      WSREP_ERROR("Failed to recover SR transactions from schema: wsrep_on : %d", WSREP_ON);
+      trans_commit(orig_thd);
     }
     break;
   default:
     /* */
-    WSREP_ERROR("Unsupported wsrep SR store type: %lu", wsrep_SR_store_type);
-    unireg_abort(1);
+    WSREP_ERROR("Unsupported wsrep SR store type: %lu wsrep_on: %d",
+                wsrep_SR_store_type, WSREP_ON);
+    trans_commit(orig_thd);
     break;
   }
 }
@@ -650,7 +655,7 @@ static std::string wsrep_server_incoming_address()
     bool is_ipv6= false;
     unsigned int my_bind_ip= INADDR_ANY; // default if not set
 
-    if (my_bind_addr_str && strlen(my_bind_addr_str) && 
+    if (my_bind_addr_str && strlen(my_bind_addr_str) &&
         strcmp(my_bind_addr_str, "*") != 0)
     {
       my_bind_ip= wsrep_check_ip(my_bind_addr_str, &is_ipv6);
@@ -709,15 +714,22 @@ static std::string wsrep_server_incoming_address()
     /*
       In case port is not specified in wsrep_node_incoming_address, we use
       mysqld_port.
+      Note that we might get here before we execute set_ports().
     */
-    int port= (addr.get_port() > 0) ? addr.get_port() : (int) mysqld_port;
+    int local_port= (addr.get_port() > 0) ? addr.get_port() : (int) mysqld_port;
+    if (!local_port)
+      local_port= MYSQL_PORT;
     const char *fmt= (addr.is_ipv6()) ? "[%s]:%u" : "%s:%u";
 
-    snprintf(inc_addr, inc_addr_max, fmt, addr.get_address(), port);
+    snprintf(inc_addr, inc_addr_max, fmt, addr.get_address(), local_port);
   }
-  
+
  done:
-  ret= wsrep_node_incoming_address;
+  if (!strlen(inc_addr))
+    ret= wsrep_node_incoming_address;
+  else
+    ret= inc_addr;
+  WSREP_DEBUG("wsrep_incoming_address = %s", ret.c_str());
   return ret;
 }
 
@@ -987,13 +999,19 @@ void wsrep_init_startup (bool sst_first)
     With mysqldump SST (!sst_first) wait until the server reaches
     joiner state and procedd to accepting connections.
   */
+  int err= 0;
   if (sst_first)
   {
-    server_state.wait_until_state(Wsrep_server_state::s_initializing);
+    err= server_state.wait_until_state(Wsrep_server_state::s_initializing);
   }
   else
   {
-    server_state.wait_until_state(Wsrep_server_state::s_joiner);
+    err= server_state.wait_until_state(Wsrep_server_state::s_joiner);
+  }
+  if (err)
+  {
+    WSREP_ERROR("Wsrep startup was interrupted");
+    unireg_abort(1);
   }
 }
 
@@ -1098,7 +1116,11 @@ void wsrep_stop_replication(THD *thd)
   {
     WSREP_DEBUG("Disconnect provider");
     Wsrep_server_state::instance().disconnect();
-    Wsrep_server_state::instance().wait_until_state(Wsrep_server_state::s_disconnected);
+    if (Wsrep_server_state::instance().wait_until_state(
+            Wsrep_server_state::s_disconnected))
+    {
+      WSREP_WARN("Wsrep interrupted while waiting for disconnected state");
+    }
   }
 
   /* my connection, should not terminate with wsrep_close_client_connection(),
@@ -1120,7 +1142,11 @@ void wsrep_shutdown_replication()
   {
     WSREP_DEBUG("Disconnect provider");
     Wsrep_server_state::instance().disconnect();
-    Wsrep_server_state::instance().wait_until_state(Wsrep_server_state::s_disconnected);
+    if (Wsrep_server_state::instance().wait_until_state(
+            Wsrep_server_state::s_disconnected))
+    {
+      WSREP_WARN("Wsrep interrupted while waiting for disconnected state");
+    }
   }
 
   wsrep_close_client_connections(TRUE);
@@ -2505,6 +2531,15 @@ bool wsrep_can_run_in_toi(THD *thd, const char *db, const char *table,
 
     return !(table || table_list);
     break;
+  case SQLCOM_CREATE_SEQUENCE:
+    /* No TOI for temporary sequences as they are
+       not replicated */
+    if (thd->lex->tmp_table())
+    {
+      return false;
+    }
+    return true;
+
   }
 }
 
@@ -2686,7 +2721,7 @@ static int wsrep_TOI_begin(THD *thd, const char *db, const char *table,
                  ret,
                  (thd->db.str ? thd->db.str : "(null)"),
                  wsrep_thd_query(thd));
-      my_error(ER_ERROR_DURING_COMMIT, MYF(0), WSREP_SIZE_EXCEEDED);
+      my_error(ER_UNKNOWN_ERROR, MYF(0), "Maximum writeset size exceeded");
       break;
     case wsrep::e_deadlock_error:
       WSREP_WARN("TO isolation failed for: %d, schema: %s, sql: %s. "
@@ -2793,6 +2828,13 @@ static int wsrep_RSU_begin(THD *thd, const char *db_, const char *table_)
   WSREP_DEBUG("RSU BEGIN: %lld, : %s", wsrep_thd_trx_seqno(thd),
               wsrep_thd_query(thd));
 
+  /* For CREATE TEMPORARY SEQUENCE we do not start RSU because
+     object is local only and actually CREATE TABLE + INSERT
+  */
+  if (thd->lex->sql_command == SQLCOM_CREATE_SEQUENCE &&
+      thd->lex->tmp_table())
+    return 1;
+
   if (thd->variables.wsrep_OSU_method == WSREP_OSU_RSU &&
       thd->variables.sql_log_bin == 1 &&
       wsrep_check_mode(WSREP_MODE_DISALLOW_LOCAL_GTID))
@@ -2892,9 +2934,20 @@ int wsrep_to_isolation_begin(THD *thd, const char *db_, const char *table_,
     return -1;
   }
 
+  /* If we are inside LOCK TABLE we release it and give warning. */
+  if (thd->variables.option_bits & OPTION_TABLE_LOCK &&
+      thd->lex->sql_command == SQLCOM_CREATE_SEQUENCE)
+  {
+    thd->locked_tables_list.unlock_locked_tables(thd);
+    thd->variables.option_bits&= ~(OPTION_TABLE_LOCK);
+    push_warning_printf(thd, Sql_condition::WARN_LEVEL_WARN,
+			HA_ERR_UNSUPPORTED,
+			"Galera cluster does not support LOCK TABLE on "
+			"SEQUENCES. Lock is released.");
+  }
   if (wsrep_debug && thd->mdl_context.has_locks())
   {
-    WSREP_DEBUG("thread holds MDL locks at TI begin: %s %llu",
+    WSREP_DEBUG("thread holds MDL locks at TO begin: %s %llu",
                 wsrep_thd_query(thd), thd->thread_id);
   }
 
@@ -3034,6 +3087,20 @@ void wsrep_handle_mdl_conflict(MDL_context *requestor_ctx,
                   request_thd, granted_thd);
     ticket->wsrep_report(wsrep_debug);
 
+    DEBUG_SYNC(request_thd, "before_wsrep_thd_abort");
+    DBUG_EXECUTE_IF("sync.before_wsrep_thd_abort", {
+      const char act[]= "now "
+                        "SIGNAL sync.before_wsrep_thd_abort_reached "
+                        "WAIT_FOR signal.before_wsrep_thd_abort";
+      DBUG_ASSERT(!debug_sync_set_action(request_thd, STRING_WITH_LEN(act)));
+    };);
+
+    /* Here we will call wsrep_abort_transaction so we should hold
+    THD::LOCK_thd_data to protect victim from concurrent usage
+    and THD::LOCK_thd_kill to protect from disconnect or delete.
+
+    */
+    mysql_mutex_lock(&granted_thd->LOCK_thd_kill);
     mysql_mutex_lock(&granted_thd->LOCK_thd_data);
 
     if (wsrep_thd_is_toi(granted_thd) ||
@@ -3045,13 +3112,11 @@ void wsrep_handle_mdl_conflict(MDL_context *requestor_ctx,
                     wsrep_thd_query(request_thd));
         THD_STAGE_INFO(request_thd, stage_waiting_isolation);
         ticket->wsrep_report(wsrep_debug);
-        mysql_mutex_unlock(&granted_thd->LOCK_thd_data);
       }
       else if (wsrep_thd_is_SR(granted_thd) && !wsrep_thd_is_SR(request_thd))
       {
         WSREP_MDL_LOG(INFO, "MDL conflict, DDL vs SR",
                       schema, schema_len, request_thd, granted_thd);
-        mysql_mutex_unlock(&granted_thd->LOCK_thd_data);
         WSREP_DEBUG("wsrep_handle_mdl_conflict DDL vs SR for %s",
                     wsrep_thd_query(request_thd));
         THD_STAGE_INFO(request_thd, stage_waiting_isolation);
@@ -3063,6 +3128,7 @@ void wsrep_handle_mdl_conflict(MDL_context *requestor_ctx,
                       request_thd, granted_thd);
         ticket->wsrep_report(true);
         mysql_mutex_unlock(&granted_thd->LOCK_thd_data);
+        mysql_mutex_unlock(&granted_thd->LOCK_thd_kill);
         unireg_abort(1);
       }
     }
@@ -3073,7 +3139,11 @@ void wsrep_handle_mdl_conflict(MDL_context *requestor_ctx,
                   wsrep_thd_query(request_thd));
       THD_STAGE_INFO(request_thd, stage_waiting_ddl);
       ticket->wsrep_report(wsrep_debug);
-      mysql_mutex_unlock(&granted_thd->LOCK_thd_data);
+      if (granted_thd->current_backup_stage != BACKUP_FINISHED &&
+	  wsrep_check_mode(WSREP_MODE_BF_MARIABACKUP))
+      {
+	wsrep_abort_thd(request_thd, granted_thd, 1);
+      }
     }
     else if (request_thd->lex->sql_command == SQLCOM_DROP_TABLE)
     {
@@ -3082,7 +3152,6 @@ void wsrep_handle_mdl_conflict(MDL_context *requestor_ctx,
                   wsrep_thd_query(request_thd));
       THD_STAGE_INFO(request_thd, stage_waiting_isolation);
       ticket->wsrep_report(wsrep_debug);
-      mysql_mutex_unlock(&granted_thd->LOCK_thd_data);
       wsrep_abort_thd(request_thd, granted_thd, 1);
     }
     else
@@ -3096,7 +3165,6 @@ void wsrep_handle_mdl_conflict(MDL_context *requestor_ctx,
 
       if (granted_thd->wsrep_trx().active())
       {
-        mysql_mutex_unlock(&granted_thd->LOCK_thd_data);
         wsrep_abort_thd(request_thd, granted_thd, 1);
       }
       else
@@ -3105,10 +3173,9 @@ void wsrep_handle_mdl_conflict(MDL_context *requestor_ctx,
           Granted_thd is likely executing with wsrep_on=0. If the requesting
           thd is BF, BF abort and wait.
         */
-        mysql_mutex_unlock(&granted_thd->LOCK_thd_data);
-
         if (wsrep_thd_is_BF(request_thd, FALSE))
         {
+          granted_thd->awake_no_mutex(KILL_QUERY_HARD);
           ha_abort_transaction(request_thd, granted_thd, TRUE);
         }
         else
@@ -3117,10 +3184,14 @@ void wsrep_handle_mdl_conflict(MDL_context *requestor_ctx,
                         schema, schema_len,
                         request_thd, granted_thd);
 	  ticket->wsrep_report(true);
+          mysql_mutex_unlock(&granted_thd->LOCK_thd_data);
+          mysql_mutex_unlock(&granted_thd->LOCK_thd_kill);
 	  unireg_abort(1);
         }
       }
     }
+    mysql_mutex_unlock(&granted_thd->LOCK_thd_data);
+    mysql_mutex_unlock(&granted_thd->LOCK_thd_kill);
   }
   else
   {
@@ -3132,13 +3203,17 @@ void wsrep_handle_mdl_conflict(MDL_context *requestor_ctx,
 static bool abort_replicated(THD *thd)
 {
   bool ret_code= false;
+  mysql_mutex_lock(&thd->LOCK_thd_kill);
+  mysql_mutex_lock(&thd->LOCK_thd_data);
   if (thd->wsrep_trx().state() == wsrep::transaction::s_committing)
   {
     WSREP_DEBUG("aborting replicated trx: %llu", (ulonglong)(thd->real_id));
 
-    (void)wsrep_abort_thd(thd, thd, TRUE);
+    wsrep_abort_thd(thd, thd, TRUE);
     ret_code= true;
   }
+  mysql_mutex_unlock(&thd->LOCK_thd_data);
+  mysql_mutex_unlock(&thd->LOCK_thd_kill);
   return ret_code;
 }
 
@@ -3163,7 +3238,9 @@ static my_bool have_client_connections(THD *thd, void*)
 {
   DBUG_PRINT("quit",("Informing thread %lld that it's time to die",
                      (longlong) thd->thread_id));
-  if (is_client_connection(thd) && thd->killed == KILL_CONNECTION)
+  if (is_client_connection(thd) &&
+      (thd->killed == KILL_CONNECTION ||
+       thd->killed == KILL_CONNECTION_HARD))
   {
     (void)abort_replicated(thd);
     return 1;
@@ -3173,7 +3250,7 @@ static my_bool have_client_connections(THD *thd, void*)
 
 static void wsrep_close_thread(THD *thd)
 {
-  thd->set_killed(KILL_CONNECTION);
+  thd->set_killed(KILL_CONNECTION_HARD);
   MYSQL_CALLBACK(thread_scheduler, post_kill_notification, (thd));
   mysql_mutex_lock(&thd->LOCK_thd_kill);
   thd->abort_current_cond_wait(true);
@@ -3207,13 +3284,13 @@ static my_bool kill_all_threads(THD *thd, THD *caller_thd)
   if (is_client_connection(thd) && thd != caller_thd)
   {
     if (is_replaying_connection(thd))
-      thd->set_killed(KILL_CONNECTION);
+      thd->set_killed(KILL_CONNECTION_HARD);
     else if (!abort_replicated(thd))
     {
       /* replicated transactions must be skipped */
       WSREP_DEBUG("closing connection %lld", (longlong) thd->thread_id);
       /* instead of wsrep_close_thread() we do now  soft kill by THD::awake */
-      thd->awake(KILL_CONNECTION);
+      thd->awake(KILL_CONNECTION_HARD);
     }
   }
   return 0;
@@ -3510,7 +3587,7 @@ int wsrep_create_trigger_query(THD *thd, uchar** buf, size_t* buf_len)
 
 void* start_wsrep_THD(void *arg)
 {
-  THD *thd;
+  THD *thd= NULL;
 
   Wsrep_thd_args* thd_args= (Wsrep_thd_args*) arg;
 
@@ -3541,6 +3618,7 @@ void* start_wsrep_THD(void *arg)
   mysql_thread_set_psi_id(thd->thread_id);
   thd->thr_create_utime=  microsecond_interval_timer();
 
+  DBUG_EXECUTE_IF("wsrep_simulate_failed_connection_1", goto error; );
 // </5.1.17>
   /*
     handle_one_connection() is normally the only way a thread would
@@ -3647,6 +3725,18 @@ void* start_wsrep_THD(void *arg)
 error:
   WSREP_ERROR("Failed to create/initialize system thread");
 
+  if (thd)
+  {
+    close_connection(thd, ER_OUT_OF_RESOURCES);
+    statistic_increment(aborted_connects, &LOCK_status);
+    server_threads.erase(thd);
+    delete thd;
+    my_thread_end();
+  }
+  delete thd_args;
+  // This will signal error to wsrep_slave_threads_update
+  wsrep_thread_create_failed.store(true, std::memory_order_relaxed);
+
   /* Abort if its the first applier/rollbacker thread. */
   if (!mysqld_server_initialized)
     unireg_abort(1);
@@ -3706,19 +3796,28 @@ bool wsrep_consistency_check(THD *thd)
 void wsrep_commit_empty(THD* thd, bool all)
 {
   DBUG_ENTER("wsrep_commit_empty");
-  WSREP_DEBUG("wsrep_commit_empty(%llu)", thd->thread_id);
+  WSREP_DEBUG("wsrep_commit_empty for %llu client_state %s client_mode"
+              " %s trans_state %s sql %s",
+              thd_get_thread_id(thd),
+              wsrep::to_c_string(thd->wsrep_cs().state()),
+              wsrep::to_c_string(thd->wsrep_cs().mode()),
+              wsrep::to_c_string(thd->wsrep_cs().transaction().state()),
+              wsrep_thd_query(thd));
+
   if (wsrep_is_real(thd, all) &&
       wsrep_thd_is_local(thd) &&
       thd->wsrep_trx().active() &&
       !thd->internal_transaction() &&
       thd->wsrep_trx().state() != wsrep::transaction::s_committed)
   {
-    /* @todo CTAS with STATEMENT binlog format and empty result set
-       seems to be committing empty. Figure out why and try to fix
-       elsewhere. */
+    /* Here transaction is either empty (i.e. no changes) or
+       it was CREATE TABLE with no row binlog format or
+       we have already aborted transaction e.g. because max writeset size
+       has been reached. */
     DBUG_ASSERT(!wsrep_has_changes(thd) ||
                 (thd->lex->sql_command == SQLCOM_CREATE_TABLE &&
-                 !thd->is_current_stmt_binlog_format_row()));
+                 !thd->is_current_stmt_binlog_format_row()) ||
+                thd->wsrep_cs().transaction().state() == wsrep::transaction::s_aborted);
     bool have_error= wsrep_current_error(thd);
     int ret= wsrep_before_rollback(thd, all) ||
       wsrep_after_rollback(thd, all) ||

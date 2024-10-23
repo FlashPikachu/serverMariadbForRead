@@ -1,6 +1,7 @@
 #
 # simple test of group_concat function
 #
+
 source include/have_sequence.inc;
 
 create table t1 (grp int, a bigint unsigned, c char(10) not null, d char(10) not null);
@@ -60,6 +61,7 @@ select grp,group_concat(c order by c) from t1 group by grp;
 
 # Test warnings
 
+--disable_ps2_protocol
 set group_concat_max_len = 4;
 select grp,group_concat(c) from t1 group by grp;
 show warnings;
@@ -71,6 +73,7 @@ set group_concat_max_len = 1024;
 select group_concat(sum(c)) from t1 group by grp;
 --error 1054
 select grp,group_concat(c order by 2) from t1 group by grp;
+--enable_ps2_protocol
 
 drop table t1;
 
@@ -236,10 +239,12 @@ select group_concat(distinct b) from t1 group by a;
 select group_concat(b order by b) from t1 group by a;
 select group_concat(distinct b order by b) from t1 group by a;
 set local group_concat_max_len=4;
+--disable_ps2_protocol
 select group_concat(b) from t1 group by a;
 select group_concat(distinct b) from t1 group by a;
 select group_concat(b order by b) from t1 group by a;
 select group_concat(distinct b order by b) from t1 group by a;
+--enable_ps2_protocol
 
 #
 # long blobs
@@ -255,10 +260,12 @@ select group_concat(distinct b) from t1 group by a;
 select group_concat(b order by b) from t1 group by a;
 select group_concat(distinct b order by b) from t1 group by a;
 set local group_concat_max_len=400;
+--disable_ps2_protocol
 select group_concat(b) from t1 group by a;
 select group_concat(distinct b) from t1 group by a;
 select group_concat(b order by b) from t1 group by a;
 select group_concat(distinct b order by b) from t1 group by a;
+--enable_ps2_protocol
 
 drop table t1;
 
@@ -403,7 +410,9 @@ drop table t1;
 create table t1 (f1 int unsigned, f2 varchar(255));
 insert into t1 values (1,repeat('a',255)),(2,repeat('b',255));
 --enable_metadata
+--disable_view_protocol
 select f2,group_concat(f1) from t1 group by f2;
+--enable_view_protocol
 --disable_metadata
 drop table t1;
 
@@ -491,7 +500,9 @@ set names latin1;
 create table t1 (f1 int unsigned, f2 varchar(255));
 insert into t1 values (1,repeat('a',255)),(2,repeat('b',255));
 --enable_metadata
+--disable_view_protocol
 select f2,group_concat(f1) from t1 group by f2;
+--enable_view_protocol
 --disable_metadata
 drop table t1;
 
@@ -512,10 +523,12 @@ CREATE TABLE t1( a VARCHAR( 10 ), b INT );
 INSERT INTO t1 VALUES ( repeat( 'a', 10 ), 1), 
                       ( repeat( 'b', 10 ), 2);
 SET group_concat_max_len = 20;
+--disable_ps2_protocol
 SELECT GROUP_CONCAT( a ) FROM t1;
 SELECT GROUP_CONCAT( DISTINCT a ) FROM t1;  
 SELECT GROUP_CONCAT( a ORDER BY b ) FROM t1;          
-SELECT GROUP_CONCAT( DISTINCT a ORDER BY b ) FROM t1; 
+SELECT GROUP_CONCAT( DISTINCT a ORDER BY b ) FROM t1;
+--enable_ps2_protocol 
 SET group_concat_max_len = DEFAULT;
 DROP TABLE t1;
 # Bug #23856:GROUP_CONCAT and ORDER BY: junk from previous rows for query on I_S
@@ -782,7 +795,9 @@ INSERT INTO t1 VALUES ('555555', 5);
 SET group_concat_max_len = 5;
 SET @old_sql_mode = @@sql_mode, @@sql_mode = 'traditional';
 
+--disable_ps2_protocol
 SELECT GROUP_CONCAT(a), b FROM t1 GROUP BY b LIMIT 3;
+--enable_ps2_protocol
 --error ER_CUT_VALUE_GROUP_CONCAT
 INSERT INTO t2 SELECT GROUP_CONCAT(a), b FROM t1 GROUP BY b;
 UPDATE t1 SET a = '11111' WHERE b = 1;
@@ -859,6 +874,7 @@ CREATE TABLE t2 SELECT GROUP_CONCAT(UPPER(f1) ORDER BY f2) FROM t1;
 SHOW CREATE TABLE t2;
 DROP TABLE t2;
 
+--disable_ps2_protocol
 SET group_concat_max_len= 1024;
 SELECT LENGTH(GROUP_CONCAT(f1 ORDER BY f2)) FROM t1;
 
@@ -868,6 +884,7 @@ SELECT LENGTH(GROUP_CONCAT(f1 ORDER BY f2)) FROM t1 GROUP BY f2;
 
 INSERT INTO t1 VALUES (REPEAT('a', 499999), 3), (REPEAT('b', 500000), 4);
 SELECT LENGTH(GROUP_CONCAT(f1 ORDER BY f2)) FROM t1 GROUP BY f2;
+--enable_ps2_protocol
 
 DROP TABLE t1;
 SET group_concat_max_len= DEFAULT;
@@ -877,8 +894,10 @@ SET group_concat_max_len= DEFAULT;
 #
 set session group_concat_max_len=1024;
 set max_session_mem_used=16*1024*1024; # 8M..32M
+--disable_ps2_protocol
 SELECT GROUP_CONCAT(concat(seq/1.1), concat(seq/1.1), concat(seq/1.1), concat(seq/1.1), concat(seq/1.1), concat(seq/1.1), concat(seq/1.1), concat(seq/1.1) ORDER BY 2,1,3,4,6,5,8,7) AS c
 FROM seq_1_to_200000;
+--enable_ps2_protocol
 set max_session_mem_used=default;
 set session group_concat_max_len=default;
 
@@ -931,7 +950,10 @@ SELECT * FROM (SELECT a,GROUP_CONCAT(a ORDER BY a) FROM t1 GROUP BY a WITH ROLLU
 SELECT * FROM v1;
 DROP VIEW v1;
 
+#enable after fix MDEV-27871
+--disable_view_protocol
 SELECT (SELECT GROUP_CONCAT(a ORDER BY a) FROM t1 GROUP BY a WITH ROLLUP HAVING GROUP_CONCAT(a ORDER BY a)='10,20,30');
+--enable_view_protocol
 CREATE VIEW v1 AS
 SELECT (SELECT GROUP_CONCAT(a ORDER BY a) FROM t1 GROUP BY a WITH ROLLUP HAVING GROUP_CONCAT(a ORDER BY a)='10,20,30');
 SELECT * FROM v1;

@@ -77,14 +77,14 @@ typedef struct st_key_part_info {	/* Info about a key part */
   uint  offset;                         /* Offset in record (from 0) */
   uint  null_offset;                    /* Offset to null_bit in record */
   /* Length of key part in bytes, excluding NULL flag and length bytes */
-  uint16 length;
+  uint length;
   /* 
     Number of bytes required to store the keypart value. This may be
     different from the "length" field as it also counts
      - possible NULL-flag byte (see HA_KEY_NULL_LENGTH)
      - possible HA_KEY_BLOB_LENGTH bytes needed to store actual value length.
   */
-  uint16 store_length;
+  uint store_length;
   uint16 key_type;
   field_index_t fieldnr;                /* Fieldnr begins counting from 1 */
   uint16 key_part_flag;                 /* 0 or HA_REVERSE_SORT */
@@ -699,19 +699,24 @@ public:
   }
   void set(const Type_handler *handler,
            const Lex_length_and_dec_st &length_and_dec,
-           const Lex_charset_collation_st &coll)
+           const Lex_column_charset_collation_attrs_st &coll)
   {
     m_handler= handler;
-    m_ci= coll.charset_collation();
+    m_ci= coll.charset_info();
     Lex_length_and_dec_st::operator=(length_and_dec);
-    m_collation_type= ((uint8) coll.type()) & 0x3;
+    // Using bit-and to avoid the warning:
+    // conversion from ‘uint8’ to ‘unsigned char:3’ may change value
+    m_collation_type= ((uint8) coll.type()) & LEX_CHARSET_COLLATION_TYPE_MASK;
   }
-  void set(const Type_handler *handler, const Lex_charset_collation_st &coll)
+  void set(const Type_handler *handler,
+           const Lex_column_charset_collation_attrs_st &coll)
   {
     m_handler= handler;
-    m_ci= coll.charset_collation();
+    m_ci= coll.charset_info();
     Lex_length_and_dec_st::reset();
-    m_collation_type= ((uint8) coll.type()) & 0x3;
+    // Using bit-and to avoid the warning:
+    // conversion from ‘uint8’ to ‘unsigned char:3’ may change value
+    m_collation_type= ((uint8) coll.type()) & LEX_CHARSET_COLLATION_TYPE_MASK;
   }
   void set(const Type_handler *handler, CHARSET_INFO *cs= NULL)
   {
@@ -734,10 +739,10 @@ public:
   }
   const Type_handler *type_handler() const { return m_handler; }
   CHARSET_INFO *charset_collation() const { return m_ci; }
-  Lex_charset_collation lex_charset_collation() const
+  Lex_column_charset_collation_attrs charset_collation_attrs() const
   {
-    return Lex_charset_collation(m_ci,
-                                 (Lex_charset_collation_st::Type)
+    return Lex_column_charset_collation_attrs(m_ci,
+                                 (Lex_column_charset_collation_attrs_st::Type)
                                  m_collation_type);
   }
 };
@@ -768,7 +773,7 @@ public:
     m_ci= cs;
     Lex_length_and_dec_st::reset();
   }
-  bool set(int type, const Lex_charset_collation_st &collation,
+  bool set(int type, const Lex_column_charset_collation_attrs_st &collation,
            CHARSET_INFO *charset)
   {
     CHARSET_INFO *tmp= collation.resolved_to_character_set(charset);
@@ -900,6 +905,11 @@ public:
   }
   Item *make_item_func_trim_std(THD *thd) const;
   Item *make_item_func_trim_oracle(THD *thd) const;
+  /*
+    This method is still used to handle LTRIM and RTRIM,
+    while the special syntax TRIM(... BOTH|LEADING|TRAILING)
+    is now handled by Schema::make_item_func_trim().
+  */
   Item *make_item_func_trim(THD *thd) const;
 };
 
@@ -908,6 +918,25 @@ class Lex_trim: public Lex_trim_st
 {
 public:
   Lex_trim(trim_spec spec, Item *source) { set(spec, source); }
+};
+
+
+class Lex_substring_spec_st
+{
+public:
+  Item *m_subject;
+  Item *m_from;
+  Item *m_for;
+  static Lex_substring_spec_st init(Item *subject,
+                                    Item *from,
+                                    Item *xfor= NULL)
+  {
+    Lex_substring_spec_st res;
+    res.m_subject= subject;
+    res.m_from= from;
+    res.m_for= xfor;
+    return res;
+  }
 };
 
 
@@ -978,7 +1007,7 @@ public:
 class Load_data_outvar
 {
 public:
-  virtual ~Load_data_outvar() {}
+  virtual ~Load_data_outvar() = default;
   virtual bool load_data_set_null(THD *thd, const Load_data_param *param)= 0;
   virtual bool load_data_set_value(THD *thd, const char *pos, uint length,
                                    const Load_data_param *param)= 0;
@@ -992,7 +1021,7 @@ public:
 class Timeval: public timeval
 {
 protected:
-  Timeval() { }
+  Timeval() = default;
 public:
   Timeval(my_time_t sec, ulong usec)
   {

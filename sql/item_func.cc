@@ -55,6 +55,9 @@
 #include "debug_sync.h"
 #include "sql_base.h"
 #include "sql_cte.h"
+#ifdef WITH_WSREP
+#include "mysql/service_wsrep.h"
+#endif /* WITH_WSREP */
 
 #ifdef NO_EMBEDDED_ACCESS_CHECKS
 #define sp_restore_security_context(A,B) while (0) {}
@@ -75,7 +78,7 @@ bool check_reserved_words(const LEX_CSTRING *name)
 */
 static inline bool test_if_sum_overflows_ull(ulonglong arg1, ulonglong arg2)
 {
-  return ULONGLONG_MAX - arg1 < arg2;
+  return ULonglong::test_if_sum_overflows_ull(arg1, arg2);
 }
 
 
@@ -345,7 +348,10 @@ Item_func::fix_fields(THD *thd, Item **ref)
 	We shouldn't call fix_fields() twice, so check 'fixed' field first
       */
       if ((*arg)->fix_fields_if_needed(thd, arg))
+      {
+        cleanup();
 	return TRUE;				/* purecov: inspected */
+      }
       item= *arg;
 
       base_flags|= item->base_flags & item_base_t::MAYBE_NULL;
@@ -355,9 +361,15 @@ Item_func::fix_fields(THD *thd, Item **ref)
     }
   }
   if (check_arguments())
+  {
+    cleanup();
     return true;
+  }
   if (fix_length_and_dec(thd))
+  {
+    cleanup();
     return TRUE;
+  }
   base_flags|= item_base_t::FIXED;
   return FALSE;
 }
@@ -734,7 +746,12 @@ void Item_func::signal_divide_by_null()
 Item *Item_func::get_tmp_table_item(THD *thd)
 {
   if (!with_sum_func() && !const_item())
-    return new (thd->mem_root) Item_temptable_field(thd, result_field);
+  {
+    auto item_field= new (thd->mem_root) Item_field(thd, result_field);
+    if (item_field)
+      item_field->set_refers_to_temp_table(true);
+    return item_field;
+  }
   return copy_or_same(thd);
 }
 
@@ -1369,79 +1386,23 @@ double Item_func_mul::real_op()
 longlong Item_func_mul::int_op()
 {
   DBUG_ASSERT(fixed());
-  longlong a= args[0]->val_int();
-  longlong b= args[1]->val_int();
-  longlong res;
-  ulonglong res0, res1;
-  ulong a0, a1, b0, b1;
-  bool     res_unsigned= FALSE;
-  bool     a_negative= FALSE, b_negative= FALSE;
-
-  if ((null_value= args[0]->null_value || args[1]->null_value))
-    return 0;
-
   /*
-    First check whether the result can be represented as a
-    (bool unsigned_flag, longlong value) pair, then check if it is compatible
-    with this Item's unsigned_flag by calling check_integer_overflow().
-
-    Let a = a1 * 2^32 + a0 and b = b1 * 2^32 + b0. Then
-    a * b = (a1 * 2^32 + a0) * (b1 * 2^32 + b0) = a1 * b1 * 2^64 +
-            + (a1 * b0 + a0 * b1) * 2^32 + a0 * b0;
-    We can determine if the above sum overflows the ulonglong range by
-    sequentially checking the following conditions:
-    1. If both a1 and b1 are non-zero.
-    2. Otherwise, if (a1 * b0 + a0 * b1) is greater than ULONG_MAX.
-    3. Otherwise, if (a1 * b0 + a0 * b1) * 2^32 + a0 * b0 is greater than
-    ULONGLONG_MAX.
-
     Since we also have to take the unsigned_flag for a and b into account,
     it is easier to first work with absolute values and set the
     correct sign later.
   */
-  if (!args[0]->unsigned_flag && a < 0)
-  {
-    a_negative= TRUE;
-    a= -a;
-  }
-  if (!args[1]->unsigned_flag && b < 0)
-  {
-    b_negative= TRUE;
-    b= -b;
-  }
+  Longlong_hybrid_null ha= args[0]->to_longlong_hybrid_null();
+  Longlong_hybrid_null hb= args[1]->to_longlong_hybrid_null();
 
-  a0= 0xFFFFFFFFUL & a;
-  a1= ((ulonglong) a) >> 32;
-  b0= 0xFFFFFFFFUL & b;
-  b1= ((ulonglong) b) >> 32;
+  if ((null_value= ha.is_null() || hb.is_null()))
+    return 0;
 
-  if (a1 && b1)
-    goto err;
+  ULonglong_null ures= ULonglong_null::ullmul(ha.abs(), hb.abs());
+  if (ures.is_null())
+    return raise_integer_overflow();
 
-  res1= (ulonglong) a1 * b0 + (ulonglong) a0 * b1;
-  if (res1 > 0xFFFFFFFFUL)
-    goto err;
-
-  res1= res1 << 32;
-  res0= (ulonglong) a0 * b0;
-
-  if (test_if_sum_overflows_ull(res1, res0))
-    goto err;
-  res= res1 + res0;
-
-  if (a_negative != b_negative)
-  {
-    if ((ulonglong) res > (ulonglong) LONGLONG_MIN + 1)
-      goto err;
-    res= -res;
-  }
-  else
-    res_unsigned= TRUE;
-
-  return check_integer_overflow(res, res_unsigned);
-
-err:
-  return raise_integer_overflow();
+  return check_integer_overflow(ULonglong_hybrid(ures.value(),
+                                                 ha.neg() != hb.neg()));
 }
 
 
@@ -1639,15 +1600,8 @@ longlong Item_func_int_div::val_int()
     return 0;
   }
 
-  bool res_negative= val0.neg() != val1.neg();
-  ulonglong res= val0.abs() / val1.abs();
-  if (res_negative)
-  {
-    if (res > (ulonglong) LONGLONG_MAX)
-      return raise_integer_overflow();
-    res= (ulonglong) (-(longlong) res);
-  }
-  return check_integer_overflow(res, !res_negative);
+  return check_integer_overflow(ULonglong_hybrid(val0.abs() / val1.abs(),
+                                                 val0.neg() != val1.neg()));
 }
 
 
@@ -1681,9 +1635,8 @@ longlong Item_func_mod::int_op()
     LONGLONG_MIN by -1 generates SIGFPE, we calculate using unsigned values and
     then adjust the sign appropriately.
   */
-  ulonglong res= val0.abs() % val1.abs();
-  return check_integer_overflow(val0.neg() ? -(longlong) res : res,
-                                !val0.neg());
+  return check_integer_overflow(ULonglong_hybrid(val0.abs() % val1.abs(),
+                                                 val0.neg()));
 }
 
 double Item_func_mod::real_op()
@@ -1759,7 +1712,7 @@ static void calc_hash_for_unique(ulong &nr1, ulong &nr2, String *str)
   cs->hash_sort((uchar *)str->ptr(), str->length(), &nr1, &nr2);
 }
 
-longlong  Item_func_hash::val_int()
+longlong  Item_func_hash_mariadb_100403::val_int()
 {
   DBUG_EXECUTE_IF("same_long_unique_hash", return 9;);
   unsigned_flag= true;
@@ -1777,6 +1730,24 @@ longlong  Item_func_hash::val_int()
   }
   null_value= 0;
   return   (longlong)nr1;
+}
+
+
+longlong  Item_func_hash::val_int()
+{
+  DBUG_EXECUTE_IF("same_long_unique_hash", return 9;);
+  unsigned_flag= true;
+  Hasher hasher;
+  for(uint i= 0;i<arg_count;i++)
+  {
+    if (args[i]->hash_not_null(&hasher))
+    {
+      null_value= 1;
+      return 0;
+    }
+  }
+  null_value= 0;
+  return (longlong) hasher.finalize();
 }
 
 
@@ -2332,6 +2303,16 @@ bool Item_func_int_val::fix_length_and_dec(THD *thd)
 }
 
 
+bool Item_func_int_val::native_op(THD *thd, Native *to)
+{
+  // TODO: turn Item_func_int_val into Item_handled_func eventually.
+  if (type_handler()->mysql_timestamp_type() == MYSQL_TIMESTAMP_TIME)
+    return Time(thd, this).to_native(to, decimals);
+  DBUG_ASSERT(0);
+  return true;
+}
+
+
 longlong Item_func_ceiling::int_op()
 {
   switch (args[0]->result_type()) {
@@ -2496,7 +2477,7 @@ void Item_func_round::fix_arg_decimal()
     set_handler(&type_handler_newdecimal);
     unsigned_flag= args[0]->unsigned_flag;
     decimals= args[0]->decimals;
-    max_length= float_length(args[0]->decimals) + 1;
+    max_length= args[0]->max_length;
   }
 }
 
@@ -2697,7 +2678,7 @@ longlong Item_func_round::int_op()
   if ((dec >= 0) || args[1]->unsigned_flag)
     return value; // integer have not digits after point
 
-  abs_dec= -dec;
+  abs_dec= Longlong(dec).abs(); // Avoid undefined behavior
   longlong tmp;
   
   if(abs_dec >= array_elements(log_10_int))
@@ -2758,6 +2739,16 @@ bool Item_func_round::date_op(THD *thd, MYSQL_TIME *to, date_mode_t fuzzydate)
   null_value= !tm->is_valid_datetime() || dec.is_null();
   DBUG_ASSERT(maybe_null() || !null_value);
   return null_value;
+}
+
+
+bool Item_func_round::native_op(THD *thd, Native *to)
+{
+  // TODO: turn Item_func_round into Item_handled_func eventually.
+  if (type_handler()->mysql_timestamp_type() == MYSQL_TIMESTAMP_TIME)
+    return Time(thd, this).to_native(to, decimals);
+  DBUG_ASSERT(0);
+  return true;
 }
 
 
@@ -3968,7 +3959,7 @@ class Interruptible_wait
     Interruptible_wait(THD *thd)
     : m_thd(thd) {}
 
-    ~Interruptible_wait() {}
+    ~Interruptible_wait() = default;
 
   public:
     /**
@@ -4601,10 +4592,12 @@ longlong Item_func_sleep::val_int()
 
   mysql_cond_destroy(&cond);
 
+#ifdef ENABLED_DEBUG_SYNC
   DBUG_EXECUTE_IF("sleep_inject_query_done_debug_sync", {
       debug_sync_set_action
         (thd, STRING_WITH_LEN("dispatch_command_end SIGNAL query_done"));
     };);
+#endif
 
   return MY_TEST(!error);                  // Return 1 killed
 }
@@ -6196,6 +6189,8 @@ bool Item_func_match::init_search(THD *thd, bool no_order)
 
   ft_handler= table->file->ft_init_ext(match_flags, key, ft_tmp);
 
+  if (!ft_handler)
+    DBUG_RETURN(1);
   if (join_key)
     table->file->ft_handler=ft_handler;
 
@@ -6569,8 +6564,8 @@ Item_func_sp::cleanup()
 LEX_CSTRING
 Item_func_sp::func_name_cstring() const
 {
-  THD *thd= current_thd;
-  return Item_sp::func_name_cstring(thd);
+  return Item_sp::func_name_cstring(current_thd,
+                                    m_handler == &sp_handler_package_function);
 }
 
 

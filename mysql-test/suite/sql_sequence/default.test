@@ -29,10 +29,12 @@ INSERT into t1 values(default(a),10);
 INSERT into t1 values(default(a),default(a));
 update t1 set a=default(a), b=12 where b=2;
 select * from t1;
+--disable_ps2_protocol
 select default(a), a, b from t1;
 select * from s1;
 select * from t1 where default(a) > 0;
 select * from s1;
+--enable_ps2_protocol
 
 --echo #
 --echo # View
@@ -70,7 +72,9 @@ UNLOCK TABLES;
 
 LOCK TABLE t1 WRITE, s1 WRITE;
 insert into t1 (b) values (5),(6);
+--disable_ps2_protocol
 select default(a) from t1;
+--enable_ps2_protocol
 UNLOCK TABLES;
 
 LOCK TABLE t1 READ;
@@ -135,3 +139,83 @@ EXECUTE stmt;
 # Cleanup
 DROP TABLE t1;
 DROP SEQUENCE s;
+
+--echo #
+--echo # MDEV-29540 Incorrect sequence values in INSERT SELECT
+--echo #
+
+CREATE SEQUENCE s1;
+CREATE TABLE t1 (
+  a BIGINT UNSIGNED NOT NULL PRIMARY KEY
+      DEFAULT (NEXT VALUE FOR s1),
+  b CHAR(1) NOT NULL
+);
+
+INSERT INTO t1 (b) VALUES ('a');
+INSERT INTO t1 (b) VALUES ('b'), ('c');
+INSERT INTO t1 (b) VALUES ('d');
+INSERT INTO t1 (b) SELECT c FROM (
+  SELECT 'e' as c
+  UNION
+  SELECT 'f'
+  UNION
+  SELECT 'g'
+) der;
+
+SELECT a, b FROM t1;
+
+ALTER SEQUENCE s1 RESTART;
+
+--error ER_DUP_ENTRY
+INSERT INTO t1 (b) SELECT c FROM (
+  SELECT 'a' as c
+  UNION
+  SELECT 'b'
+  UNION
+  SELECT 'c'
+  UNION
+  SELECT 'd'
+  UNION
+  SELECT 'e'
+  UNION
+  SELECT 'f'
+  UNION
+  SELECT 'g'
+) der;
+
+ALTER SEQUENCE s1 RESTART;
+
+INSERT IGNORE INTO t1 (b) SELECT c FROM (
+  SELECT 'a' as c
+  UNION
+  SELECT 'b'
+  UNION
+  SELECT 'c'
+  UNION
+  SELECT 'd'
+  UNION
+  SELECT 'e'
+  UNION
+  SELECT 'f'
+  UNION
+  SELECT 'g'
+) der;
+
+SELECT a, b FROM t1;
+
+INSERT IGNORE INTO t1 (b) SELECT c FROM (
+  SELECT 'h' as c
+  UNION
+  SELECT 'i'
+  UNION
+  SELECT 'j'
+) der;
+
+SELECT a, b FROM t1;
+
+DROP TABLE t1;
+DROP SEQUENCE s1;
+
+--echo #
+--echo # End of 10.3 tests
+--echo #

@@ -158,7 +158,7 @@ static int dbfhead(PGLOBAL g, FILE *file, PCSZ fn, DBFHEADER *buf)
 
   // Check last byte(s) of header
   if (fseek(file, buf->Headlen() - dbc, SEEK_SET) != 0) {
-    sprintf(g->Message, MSG(BAD_HEADER), fn);
+    snprintf(g->Message, sizeof(g->Message), MSG(BAD_HEADER), fn);
     return RC_FX;
   } // endif fseek
 
@@ -169,7 +169,7 @@ static int dbfhead(PGLOBAL g, FILE *file, PCSZ fn, DBFHEADER *buf)
 
   // Some files have just 1D others have 1D00 following fields
   if (endmark[0] != EOH && endmark[1] != EOH) {
-    sprintf(g->Message, MSG(NO_0DH_HEAD), dbc);
+    snprintf(g->Message, sizeof(g->Message), MSG(NO_0DH_HEAD), dbc);
 
     if (rc == RC_OK)
       return RC_FX;
@@ -215,7 +215,7 @@ static int dbfields(PGLOBAL g, DBFHEADER* hdrp)
 
 	// Some headers just have 1D others have 1D00 following fields
 	if (endmark[0] != EOH && endmark[1] != EOH) {
-		sprintf(g->Message, MSG(NO_0DH_HEAD), dbc);
+		snprintf(g->Message, sizeof(g->Message), MSG(NO_0DH_HEAD), dbc);
 
 		if (rc == RC_OK)
 			return RC_FX;
@@ -245,7 +245,7 @@ PQRYRES DBFColumns(PGLOBAL g, PCSZ dp, PCSZ fn, PTOS topt, bool info)
   int        rc, type, len, field, fields;
   bool       bad, mul;
 	PCSZ       target, pwd;
-  DBFHEADER  mainhead, *hp;
+  DBFHEADER  mainhead, *hp = NULL;
 	DESCRIPTOR thisfield, *tfp;
 	FILE      *infile = NULL;
 	UNZIPUTL  *zutp = NULL;
@@ -336,9 +336,9 @@ PQRYRES DBFColumns(PGLOBAL g, PCSZ dp, PCSZ fn, PTOS topt, bool info)
           hp->Headlen(), hp->Reclen(), fields);
     htrc("flags(iem)=%d,%d,%d cp=%d\n", hp->Incompleteflag,
           hp->Encryptflag, hp->Mdxflag, hp->Language);
-    htrc("%hd records, last changed %02d/%02d/%d\n",
-          hp->Records(), hp->Filedate[1], hp->Filedate[2],
-          hp->Filedate[0] + ((hp->Filedate[0] <= 30) ? 2000 : 1900));
+    htrc("%hd records, last changed %04d-%02d-%02d\n",
+          hp->Records(),
+          hp->Filedate[0] + 1900, hp->Filedate[1], hp->Filedate[2]);
     htrc("Field    Type  Offset  Len  Dec  Set  Mdx\n");
     } // endif trace
 
@@ -353,7 +353,7 @@ PQRYRES DBFColumns(PGLOBAL g, PCSZ dp, PCSZ fn, PTOS topt, bool info)
 		if (topt->zipped) {
 			tfp = (DESCRIPTOR*)((char*)tfp + HEADLEN);
 		} else if (fread(tfp, HEADLEN, 1, infile) != 1) {
-      sprintf(g->Message, MSG(ERR_READING_REC), field+1, fn);
+      snprintf(g->Message, sizeof(g->Message), MSG(ERR_READING_REC), field+1, fn);
       goto err;
     } // endif fread
 
@@ -394,7 +394,7 @@ PQRYRES DBFColumns(PGLOBAL g, PCSZ dp, PCSZ fn, PTOS topt, bool info)
         break;
       default:
         if (!info) {
-          sprintf(g->Message, MSG(BAD_DBF_TYPE), tfp->Type
+          snprintf(g->Message, sizeof(g->Message), MSG(BAD_DBF_TYPE), tfp->Type
                                                , tfp->Name);
           goto err;
           } // endif info
@@ -443,7 +443,7 @@ PQRYRES DBFColumns(PGLOBAL g, PCSZ dp, PCSZ fn, PTOS topt, bool info)
       hp->Headlen, hp->Filedate[0], hp->Filedate[1],
       hp->Filedate[2]);
 
-    strcat(g->Message, buf);
+    safe_strcat(g->Message, sizeof(g->Message), buf);
     } // endif info
 #endif // 0
 
@@ -543,7 +543,7 @@ int DBFFAM::Cardinality(PGLOBAL g)
 
 		if (rln && Lrecl != rln) {
 			// This happens always on some Linux platforms
-			sprintf(g->Message, MSG(BAD_LRECL), Lrecl, (ushort)rln);
+			snprintf(g->Message, sizeof(g->Message), MSG(BAD_LRECL), Lrecl, (ushort)rln);
 
 			if (Accept) {
 				Lrecl = rln;
@@ -606,11 +606,10 @@ bool DBFFAM::OpenTableFile(PGLOBAL g)
       strcpy(opmode, (UseTemp) ? "rb" : "r+b");
       break;
     case MODE_INSERT:
-      // Must be in text mode to remove an eventual EOF character
-      strcpy(opmode, "a+");
+      strcpy(opmode, Records ? "r+b" : "w+b");
       break;
     default:
-      sprintf(g->Message, MSG(BAD_OPEN_MODE), mode);
+      snprintf(g->Message, sizeof(g->Message), MSG(BAD_OPEN_MODE), mode);
       return true;
     } // endswitch Mode
 
@@ -620,7 +619,7 @@ bool DBFFAM::OpenTableFile(PGLOBAL g)
   if (!(Stream = PlugOpenFile(g, filename, opmode))) {
     if (trace(1))
       htrc("%s\n", g->Message);
-    
+
     return (mode == MODE_READ && errno == ENOENT)
             ? PushWarning(g, Tdbp) : true;
     } // endif Stream
@@ -644,6 +643,7 @@ bool DBFFAM::AllocateBuffer(PGLOBAL g)
   {
   char c;
   int  rc;
+  int len;
   MODE mode = Tdbp->GetMode();
 
   Buflen = Blksize;
@@ -657,7 +657,7 @@ bool DBFFAM::AllocateBuffer(PGLOBAL g)
     /*  translating 0A bytes (LF) into 0D0A (CRLF) by Windows in text mode. */
     /************************************************************************/
     if (_setmode(_fileno(Stream), _O_BINARY) == -1) {
-      sprintf(g->Message, MSG(BIN_MODE_FAIL), strerror(errno));
+      snprintf(g->Message, sizeof(g->Message), MSG(BIN_MODE_FAIL), strerror(errno));
       return true;
       } // endif setmode
 #endif   // _WIN32
@@ -665,7 +665,7 @@ bool DBFFAM::AllocateBuffer(PGLOBAL g)
     /************************************************************************/
     /*  If this is a new file, the header must be generated.                */
     /************************************************************************/
-    int len = GetFileLength(g);
+    len = GetFileLength(g);
 
     if (!len) {
       // Make the header for this DBF table file
@@ -686,7 +686,7 @@ bool DBFFAM::AllocateBuffer(PGLOBAL g)
           } // endif Flags
 
       if (Lrecl != reclen) {
-        sprintf(g->Message, MSG(BAD_LRECL), Lrecl, reclen);
+        snprintf(g->Message, sizeof(g->Message), MSG(BAD_LRECL), Lrecl, reclen);
 
 				if (Accept) {
 					Lrecl = reclen;
@@ -703,7 +703,7 @@ bool DBFFAM::AllocateBuffer(PGLOBAL g)
       header->Version = DBFTYPE;
       t = time(NULL) - (time_t)DTVAL::GetShift();
       datm = gmtime(&t);
-      header->Filedate[0] = datm->tm_year - 100;
+      header->Filedate[0] = datm->tm_year;
       header->Filedate[1] = datm->tm_mon + 1;
       header->Filedate[2] = datm->tm_mday;
       header->SetHeadlen((ushort)hlen);
@@ -728,7 +728,7 @@ bool DBFFAM::AllocateBuffer(PGLOBAL g)
             case 'D':           // Date
               break;
             default:            // Should never happen
-              sprintf(g->Message, MSG(BAD_DBF_TYPE),
+              snprintf(g->Message, sizeof(g->Message), MSG(BAD_DBF_TYPE),
                                   c, cdp->GetName());
               return true;
             } // endswitch c
@@ -742,7 +742,7 @@ bool DBFFAM::AllocateBuffer(PGLOBAL g)
 
       //  Now write the header
       if (fwrite(header, 1, hlen, Stream) != (unsigned)hlen) {
-        sprintf(g->Message, MSG(FWRITE_ERROR), strerror(errno));
+        snprintf(g->Message, sizeof(g->Message), MSG(FWRITE_ERROR), strerror(errno));
         return true;
         } // endif fwrite
 
@@ -770,7 +770,7 @@ bool DBFFAM::AllocateBuffer(PGLOBAL g)
 
     if ((rc = dbfhead(g, Stream, Tdbp->GetFile(g), &header)) == RC_OK) {
       if (Lrecl != (int)header.Reclen()) {
-        sprintf(g->Message, MSG(BAD_LRECL), Lrecl, header.Reclen());
+        snprintf(g->Message, sizeof(g->Message), MSG(BAD_LRECL), Lrecl, header.Reclen());
 
 				if (Accept) {
 					Lrecl = header.Reclen();
@@ -794,13 +794,17 @@ bool DBFFAM::AllocateBuffer(PGLOBAL g)
   /**************************************************************************/
   /*  Position the file at the begining of the data.                        */
   /**************************************************************************/
-  if (Tdbp->GetMode() == MODE_INSERT)
-    rc = fseek(Stream, 0, SEEK_END);
+  if (Tdbp->GetMode() == MODE_INSERT) {
+    if (len)
+      rc = fseek(Stream, -1, SEEK_END);
+    else
+      rc = fseek(Stream, 0, SEEK_END);
+    }
   else
     rc = fseek(Stream, Headlen, SEEK_SET);
 
   if (rc) {
-    sprintf(g->Message, MSG(BAD_DBF_FILE), Tdbp->GetFile(g));
+    snprintf(g->Message, sizeof(g->Message), MSG(BAD_DBF_FILE), Tdbp->GetFile(g));
     return true;
     } // endif fseek
 
@@ -858,7 +862,7 @@ int DBFFAM::ReadBuffer(PGLOBAL g)
       break;
     default:
       if (++Nerr >= Maxerr && !Accept) {
-        sprintf(g->Message, MSG(BAD_DBF_REC), Tdbp->GetFile(g), GetRowID());
+        snprintf(g->Message, sizeof(g->Message), MSG(BAD_DBF_REC), Tdbp->GetFile(g), GetRowID());
         rc = RC_FX;
       } else
         rc = (Accept) ? RC_OK : RC_NF;
@@ -883,9 +887,9 @@ bool DBFFAM::CopyHeader(PGLOBAL g)
     if (fseek(Stream, 0, SEEK_SET))
       strcpy(g->Message, "Seek error in CopyHeader");
     else if ((n = fread(hdr, 1, hlen, Stream)) != hlen)
-      sprintf(g->Message, MSG(BAD_READ_NUMBER), (int) n, To_File);
+      snprintf(g->Message, sizeof(g->Message), MSG(BAD_READ_NUMBER), (int) n, To_File);
     else if ((n = fwrite(hdr, 1, hlen, T_Stream)) != hlen)
-      sprintf(g->Message, MSG(WRITE_STRERROR), To_Fbt->Fname
+      snprintf(g->Message, sizeof(g->Message), MSG(WRITE_STRERROR), To_Fbt->Fname
                                              , strerror(errno));
     else if (fseek(Stream, pos, SEEK_SET))
       strcpy(g->Message, "Seek error in CopyHeader");
@@ -911,16 +915,16 @@ int DBFFAM::InitDelete(PGLOBAL g, int fpos, int spos)
   if (Nrec != 1)
     strcpy(g->Message, "Cannot delete in block mode");
   else if (fseek(Stream, Headlen + fpos * Lrecl, SEEK_SET))
-    sprintf(g->Message, MSG(FSETPOS_ERROR), 0);
+    snprintf(g->Message, sizeof(g->Message), MSG(FSETPOS_ERROR), 0);
   else if (fread(To_Buf, 1, lrecl, Stream) != lrecl)
-    sprintf(g->Message, MSG(READ_ERROR), To_File, strerror(errno));
+    snprintf(g->Message, sizeof(g->Message), MSG(READ_ERROR), To_File, strerror(errno));
   else
     *To_Buf = '*';
 
   if (fseek(Stream, Headlen + fpos * Lrecl, SEEK_SET))
-    sprintf(g->Message, MSG(FSETPOS_ERROR), 0);
+    snprintf(g->Message, sizeof(g->Message), MSG(FSETPOS_ERROR), 0);
   else if (fwrite(To_Buf, 1, lrecl, Stream) != lrecl)
-    sprintf(g->Message, MSG(FWRITE_ERROR), strerror(errno));
+    snprintf(g->Message, sizeof(g->Message), MSG(FWRITE_ERROR), strerror(errno));
   else
     rc = RC_NF;     // Ok, Nothing else to do 
 
@@ -980,6 +984,7 @@ void DBFFAM::CloseTableFile(PGLOBAL g, bool abort)
     Rbuf = CurNum--;
 //  Closing = true;
     wrc = WriteBuffer(g);
+    fputc(0x1a, Stream);
   } else if (mode == MODE_UPDATE || mode == MODE_DELETE) {
     if (Modif && !Closing) {
       // Last updated block remains to be written
@@ -1004,35 +1009,27 @@ void DBFFAM::CloseTableFile(PGLOBAL g, bool abort)
   } // endif's mode
 
   if (Tdbp->GetMode() == MODE_INSERT) {
-    int n = ftell(Stream) - Headlen;
-
-    rc = PlugCloseFile(g, To_Fb);
+    int n = ftell(Stream) - Headlen - 1;
 
     if (n >= 0 && !(n % Lrecl)) {
       n /= Lrecl;                       // New number of lines
 
       if (n > Records) {
         // Update the number of rows in the file header
-        char filename[_MAX_PATH];
+        char nRecords[4];
+        int4store(nRecords, n);
 
-        PlugSetPath(filename, To_File, Tdbp->GetPath());
-        if ((Stream= global_fopen(g, MSGID_OPEN_MODE_STRERROR, filename, "r+b")))
-        {
-          char nRecords[4];
-          int4store(nRecords, n);
-
-          fseek(Stream, 4, SEEK_SET);     // Get header.Records position
-          fwrite(nRecords, sizeof(nRecords), 1, Stream);
-          fclose(Stream);
-          Stream= NULL;
-          Records= n;                    // Update Records value
-        }
+        fseek(Stream, 4, SEEK_SET);     // Get header.Records position
+        fwrite(nRecords, sizeof(nRecords), 1, Stream);
+        Stream= NULL;
+        Records= n;                    // Update Records value
       } // endif n
 
     } // endif n
 
-  } else  // Finally close the file
-    rc = PlugCloseFile(g, To_Fb);
+  }
+  // Finally close the file
+  rc = PlugCloseFile(g, To_Fb);
 
  fin:
   if (trace(1))
@@ -1064,7 +1061,7 @@ int DBMFAM::Cardinality(PGLOBAL g)
 
 		if (rln && Lrecl != rln) {
 			// This happens always on some Linux platforms
-			sprintf(g->Message, MSG(BAD_LRECL), Lrecl, (ushort)rln);
+			snprintf(g->Message, sizeof(g->Message), MSG(BAD_LRECL), Lrecl, (ushort)rln);
 
 			if (Accept) {
 				Lrecl = rln;
@@ -1117,7 +1114,7 @@ bool DBMFAM::AllocateBuffer(PGLOBAL g)
     DBFHEADER *hp = (DBFHEADER*)Memory;
 
     if (Lrecl != (int)hp->Reclen()) {
-      sprintf(g->Message, MSG(BAD_LRECL), Lrecl, hp->Reclen());
+      snprintf(g->Message, sizeof(g->Message), MSG(BAD_LRECL), Lrecl, hp->Reclen());
 
 			if (Accept) {
 				Lrecl = hp->Reclen();
@@ -1170,7 +1167,7 @@ int DBMFAM::ReadBuffer(PGLOBAL g)
       break;
     default:
       if (++Nerr >= Maxerr && !Accept) {
-        sprintf(g->Message, MSG(BAD_DBF_REC), Tdbp->GetFile(g), GetRowID());
+        snprintf(g->Message, sizeof(g->Message), MSG(BAD_DBF_REC), Tdbp->GetFile(g), GetRowID());
         rc = RC_FX;
       } else
         rc = (Accept) ? RC_OK : RC_NF;

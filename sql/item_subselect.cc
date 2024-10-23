@@ -1,5 +1,5 @@
 /* Copyright (c) 2002, 2016, Oracle and/or its affiliates.
-   Copyright (c) 2010, 2021, MariaDB
+   Copyright (c) 2010, 2022, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -392,52 +392,9 @@ bool Item_subselect::mark_as_eliminated_processor(void *arg)
 bool Item_subselect::eliminate_subselect_processor(void *arg)
 {
   unit->item= NULL;
-  unit->exclude();
+  if (!unit->is_excluded())
+    unit->exclude();
   eliminated= TRUE;
-  return FALSE;
-}
-
-
-/**
-  Adjust the master select of the subquery to be the fake_select which
-  represents the whole UNION right above the subquery, instead of the
-  last query of the UNION.
-
-  @param arg  pointer to the fake select
-
-  @return
-    FALSE to force the evaluation of the processor for the subsequent items.
-*/
-
-bool Item_subselect::set_fake_select_as_master_processor(void *arg)
-{
-  SELECT_LEX *fake_select= (SELECT_LEX*) arg;
-  /*
-    Move the st_select_lex_unit of a subquery from a global ORDER BY clause to
-    become a direct child of the fake_select of a UNION. In this way the
-    ORDER BY that is applied to the temporary table that contains the result of
-    the whole UNION, and all columns in the subquery are resolved against this
-    table. The transformation is applied only for immediate child subqueries of
-    a UNION query.
-  */
-  if (unit->outer_select()->master_unit()->fake_select_lex == fake_select)
-  {
-    /*
-      Set the master of the subquery to be the fake select (i.e. the whole
-      UNION), instead of the last query in the UNION.
-    */
-    fake_select->add_slave(unit);
-    DBUG_ASSERT(unit->outer_select() == fake_select);
-    /* Adjust the name resolution context hierarchy accordingly. */
-    for (SELECT_LEX *sl= unit->first_select(); sl; sl= sl->next_select())
-      sl->context.outer_context= &(fake_select->context);
-    /*
-      Undo Item_subselect::eliminate_subselect_processor because at that phase
-      we don't know yet that the ORDER clause will be moved to the fake select.
-    */
-    unit->item= this;
-    eliminated= FALSE;
-  }
   return FALSE;
 }
 
@@ -449,11 +406,11 @@ bool Item_subselect::mark_as_dependent(THD *thd, st_select_lex *select,
   {
     is_correlated= TRUE;
     Ref_to_outside *upper;
-    if (!(upper= new (thd->stmt_arena->mem_root) Ref_to_outside()))
+    if (!(upper= new (thd->mem_root) Ref_to_outside()))
       return TRUE;
     upper->select= select;
     upper->item= item;
-    if (upper_refs.push_back(upper, thd->stmt_arena->mem_root))
+    if (upper_refs.push_back(upper, thd->mem_root))
       return TRUE;
   }
   return FALSE;
@@ -826,6 +783,7 @@ bool Item_subselect::exec()
   DBUG_ENTER("Item_subselect::exec");
   DBUG_ASSERT(fixed());
   DBUG_ASSERT(thd);
+  DBUG_ASSERT(!eliminated);
 
   DBUG_EXECUTE_IF("Item_subselect",
     Item::Print print(this,
@@ -1068,7 +1026,13 @@ bool Item_subselect::const_item() const
 Item *Item_subselect::get_tmp_table_item(THD *thd_arg)
 {
   if (!with_sum_func() && !const_item())
-    return new (thd->mem_root) Item_temptable_field(thd_arg, result_field);
+  {
+    auto item_field=
+        new (thd->mem_root) Item_field(thd_arg, result_field);
+    if (item_field)
+      item_field->set_refers_to_temp_table(true);
+    return item_field;
+  }
   return copy_or_same(thd_arg);
 }
 
@@ -1355,11 +1319,18 @@ bool Item_singlerow_subselect::fix_length_and_dec()
   }
   unsigned_flag= value->unsigned_flag;
   /*
-    If there are not tables in subquery then ability to have NULL value
-    depends on SELECT list (if single row subquery have tables then it
-    always can be NULL if there are not records fetched).
+    If the subquery has no tables (1) and is not a UNION (2), like:
+
+      (SELECT subq_value)
+
+    then its NULLability is the same as subq_value's NULLability.
+
+    (1): A subquery that uses a table will return NULL when the table is empty.
+    (2): A UNION subquery will return NULL if it produces a "Subquery returns
+         more than one row" error.
   */
-  if (engine->no_tables())
+  if (engine->no_tables() &&
+      engine->engine_type() != subselect_engine::UNION_ENGINE)
     set_maybe_null(engine->may_be_null());
   else
   {
@@ -1394,6 +1365,16 @@ Item* Item_singlerow_subselect::expr_cache_insert_transformer(THD *tmp_thd,
   DBUG_ENTER("Item_singlerow_subselect::expr_cache_insert_transformer");
 
   DBUG_ASSERT(thd == tmp_thd);
+
+  /*
+    Do not create subquery cache if the subquery was eliminated.
+    The optimizer may eliminate subquery items (see
+    eliminate_subselect_processor). However it does not update
+    all query's data structures, so the eliminated item may be
+    still reachable.
+  */
+  if (eliminated)
+    DBUG_RETURN(this);
 
   if (expr_cache)
     DBUG_RETURN(expr_cache);
@@ -2091,7 +2072,7 @@ Item_in_subselect::single_value_transformer(JOIN *join)
     thd->lex->current_select= current;
 
     /* We will refer to upper level cache array => we have to save it for SP */
-    optimizer->keep_top_level_cache();
+    DBUG_ASSERT(optimizer->get_cache()[0]->is_array_kept());
 
     /*
       As far as  Item_in_optimizer does not substitute itself on fix_fields
@@ -2491,7 +2472,7 @@ Item_in_subselect::row_value_transformer(JOIN *join)
     }
 
     // we will refer to upper level cache array => we have to save it in PS
-    optimizer->keep_top_level_cache();
+    DBUG_ASSERT(optimizer->get_cache()[0]->is_array_kept());
 
     thd->lex->current_select= current;
     /*
@@ -2871,6 +2852,8 @@ bool Item_in_subselect::inject_in_to_exists_cond(JOIN *join_arg)
     }
 
     where_item= and_items(thd, join_arg->conds, where_item);
+
+    /* This is the fix_fields() call mentioned in the comment above */
     if (where_item->fix_fields_if_needed(thd, 0))
       DBUG_RETURN(true);
     // TIMOUR TODO: call optimize_cond() for the new where clause
@@ -2881,7 +2864,10 @@ bool Item_in_subselect::inject_in_to_exists_cond(JOIN *join_arg)
     /* Attach back the list of multiple equalities to the new top-level AND. */
     if (and_args && join_arg->cond_equal)
     {
-      /* The argument list of the top-level AND may change after fix fields. */
+      /*
+        The fix_fields() call above may have changed the argument list, so
+        fetch it again:
+      */
       and_args= ((Item_cond*) join_arg->conds)->argument_list();
       ((Item_cond_and *) (join_arg->conds))->m_cond_equal=
                                              *join_arg->cond_equal;
@@ -2920,7 +2906,9 @@ bool Item_exists_subselect::select_prepare_to_be_in()
   bool trans_res= FALSE;
   DBUG_ENTER("Item_exists_subselect::select_prepare_to_be_in");
   if (!optimizer &&
-      thd->lex->sql_command == SQLCOM_SELECT &&
+      (thd->lex->sql_command == SQLCOM_SELECT ||
+       thd->lex->sql_command == SQLCOM_UPDATE_MULTI ||
+       thd->lex->sql_command == SQLCOM_DELETE_MULTI) &&
       !unit->first_select()->is_part_of_union() &&
       optimizer_flag(thd, OPTIMIZER_SWITCH_EXISTS_TO_IN) &&
       (is_top_level_item() ||
@@ -4634,10 +4622,11 @@ void subselect_union_engine::print(String *str, enum_query_type query_type)
 void subselect_uniquesubquery_engine::print(String *str,
                                             enum_query_type query_type)
 {
+  TABLE *table= tab->tab_list ? tab->tab_list->table : tab->table;
   str->append(STRING_WITH_LEN("<primary_index_lookup>("));
   tab->ref.items[0]->print(str, query_type);
   str->append(STRING_WITH_LEN(" in "));
-  if (tab->table->s->table_category == TABLE_CATEGORY_TEMPORARY)
+  if (table->s->table_category == TABLE_CATEGORY_TEMPORARY)
   {
     /*
       Temporary tables' names change across runs, so they can't be used for
@@ -4646,8 +4635,8 @@ void subselect_uniquesubquery_engine::print(String *str,
     str->append(STRING_WITH_LEN("<temporary table>"));
   }
   else
-    str->append(&tab->table->s->table_name);
-  KEY *key_info= tab->table->key_info+ tab->ref.key;
+    str->append(&table->s->table_name);
+  KEY *key_info= table->key_info+ tab->ref.key;
   str->append(STRING_WITH_LEN(" on "));
   str->append(&key_info->name);
   if (cond)
@@ -4665,12 +4654,13 @@ all other tests pass.
 
 void subselect_uniquesubquery_engine::print(String *str)
 {
-  KEY *key_info= tab->table->key_info + tab->ref.key;
+  TABLE *table= tab->tab_list ? tab->tab_list->table : tab->table;
+  KEY *key_info= table->key_info + tab->ref.key;
   str->append(STRING_WITH_LEN("<primary_index_lookup>("));
   for (uint i= 0; i < key_info->user_defined_key_parts; i++)
     tab->ref.items[i]->print(str);
   str->append(STRING_WITH_LEN(" in "));
-  str->append(&tab->table->s->table_name);
+  str->append(&table->s->table_name);
   str->append(STRING_WITH_LEN(" on "));
   str->append(&key_info->name);
   if (cond)
@@ -4685,11 +4675,12 @@ void subselect_uniquesubquery_engine::print(String *str)
 void subselect_indexsubquery_engine::print(String *str,
                                            enum_query_type query_type)
 {
+  TABLE *table= tab->tab_list ? tab->tab_list->table : tab->table;
   str->append(STRING_WITH_LEN("<index_lookup>("));
   tab->ref.items[0]->print(str, query_type);
   str->append(STRING_WITH_LEN(" in "));
-  str->append(tab->table->s->table_name.str, tab->table->s->table_name.length);
-  KEY *key_info= tab->table->key_info+ tab->ref.key;
+  str->append(&table->s->table_name);
+  KEY *key_info= table->key_info+ tab->ref.key;
   str->append(STRING_WITH_LEN(" on "));
   str->append(&key_info->name);
   if (check_null)
@@ -5308,21 +5299,20 @@ bool subselect_hash_sj_engine::make_semi_join_conds()
   tmp_table_ref->init_one_table(&empty_clex_str, &table_name, NULL, TL_READ);
   tmp_table_ref->table= tmp_table;
 
-  context= new Name_resolution_context;
-  context->init();
-  context->first_name_resolution_table=
-    context->last_name_resolution_table= tmp_table_ref;
+  context= new Name_resolution_context(tmp_table_ref);
   semi_join_conds_context= context;
-  
+
   for (uint i= 0; i < item_in->left_expr->cols(); i++)
   {
     /* New equi-join condition for the current column. */
     Item_func_eq *eq_cond;
     /* Item for the corresponding field from the materialized temp table. */
-    Item_field *right_col_item;
+    Item_field *right_col_item= new (thd->mem_root)
+        Item_field(thd, context, tmp_table->field[i]);
+    if (right_col_item)
+      right_col_item->set_refers_to_temp_table(true);
 
-    if (!(right_col_item= new (thd->mem_root)
-          Item_temptable_field(thd, context, tmp_table->field[i])) ||
+    if (!right_col_item ||
         !(eq_cond= new (thd->mem_root)
           Item_func_eq(thd, item_in->left_expr->element_index(i),
                        right_col_item)) ||
@@ -5373,6 +5363,7 @@ subselect_hash_sj_engine::make_unique_engine()
     DBUG_RETURN(NULL);
 
   tab->table= tmp_table;
+  tab->tab_list= 0;
   tab->preread_init_done= FALSE;
   tab->ref.tmp_table_index_lookup_init(thd, tmp_key, it, FALSE);
 

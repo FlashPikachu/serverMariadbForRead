@@ -83,7 +83,7 @@ BYTE OpBmp(PGLOBAL g, OPVAL opc)
     case OP_LE: bt = 0x04; break;
     case OP_EXIST: bt = 0x00; break;
     default:
-      sprintf(g->Message, MSG(BAD_FILTER_OP), opc);
+      snprintf(g->Message, sizeof(g->Message), MSG(BAD_FILTER_OP), opc);
 			throw (int)TYPE_FILTER;
 	} // endswitch opc
 
@@ -386,7 +386,7 @@ int FILTER::CheckColumn(PGLOBAL g, PSQL sqlp, PXOB &p, int &ag)
     } // endfor i
 
   if (*errmsg) {
-    strcpy(g->Message, errmsg);
+    snprintf(g->Message, sizeof(g->Message), errmsg);
     return -1;
   } else
     return n;
@@ -993,7 +993,7 @@ bool FILTER::Convert(PGLOBAL g, bool having)
         break;
       case TYPE_ARRAY:
         if ((Opc != OP_IN && !Opm) || i == 0) {
-          strcpy(g->Message, MSG(BAD_ARRAY_OPER));
+          snprintf(g->Message, sizeof(g->Message), MSG(BAD_ARRAY_OPER));
           return TRUE;
           } // endif
 
@@ -1007,7 +1007,7 @@ bool FILTER::Convert(PGLOBAL g, bool having)
           goto TEST;             // Filter has only one argument
           } // endif i
 
-        strcpy(g->Message, MSG(VOID_FIRST_ARG));
+        snprintf(g->Message, sizeof(g->Message), MSG(VOID_FIRST_ARG));
         return TRUE;
       } // endswitch
 
@@ -1021,7 +1021,7 @@ bool FILTER::Convert(PGLOBAL g, bool having)
     // Special case of the LIKE operator.
     if (Opc == OP_LIKE) {
       if (!IsTypeChar((int)Test[i].B_T)) {
-        sprintf(g->Message, MSG(BAD_TYPE_LIKE), i, Test[i].B_T);
+        snprintf(g->Message, sizeof(g->Message), MSG(BAD_TYPE_LIKE), i, Test[i].B_T);
         return TRUE;
         } // endif
 
@@ -1052,7 +1052,7 @@ bool FILTER::Convert(PGLOBAL g, bool having)
     } // endif Opc
 
     if (comtype == TYPE_ERROR) {
-      strcpy(g->Message, MSG(ILL_FILTER_CONV));
+      snprintf(g->Message, sizeof(g->Message), MSG(ILL_FILTER_CONV));
       return TRUE;
       } // endif
 
@@ -1101,7 +1101,7 @@ bool FILTER::Convert(PGLOBAL g, bool having)
 
           break;
         case TYPE_FILTER:
-          strcpy(g->Message, MSG(UNMATCH_FIL_ARG));
+          snprintf(g->Message, sizeof(g->Message), MSG(UNMATCH_FIL_ARG));
           return TRUE;
         default:
           // Conversion from Column, Select/Func, Expr, Scalfnc...
@@ -1129,11 +1129,11 @@ bool FILTER::Convert(PGLOBAL g, bool having)
 
   //  Last check to be sure all is correct.
   if (Test[0].B_T != Test[1].B_T) {
-    sprintf(g->Message, MSG(BAD_FILTER_CONV), Test[0].B_T, Test[1].B_T);
+    snprintf(g->Message, sizeof(g->Message), MSG(BAD_FILTER_CONV), Test[0].B_T, Test[1].B_T);
     return TRUE;
 //} else if (Test[0].B_T == TYPE_LIST &&
 //          ((LSTVAL*)Val(0))->GetN() != ((LSTVAL*)Val(1))->GetN()) {
-//  sprintf(g->Message, MSG(ROW_ARGNB_ERR),
+//  snprintf(g->Message, sizeof(g->Message), MSG(ROW_ARGNB_ERR),
 //          ((LSTVAL*)Val(0))->GetN(), ((LSTVAL*)Val(1))->GetN());
 //  return TRUE;
   } // endif's B_T
@@ -1271,7 +1271,7 @@ bool FILTER::Eval(PGLOBAL g)
           ap = (PARRAY)Arg(1);
           break;
         default:
-          strcpy(g->Message, MSG(IN_WITHOUT_SUB));
+          snprintf(g->Message, sizeof(g->Message), MSG(IN_WITHOUT_SUB));
           goto FilterError;
         } // endswitch Type
 
@@ -1372,7 +1372,7 @@ bool FILTER::Eval(PGLOBAL g)
   return FALSE;
 
  FilterError:
-  sprintf(g->Message, MSG(BAD_FILTER),
+  snprintf(g->Message, sizeof(g->Message), MSG(BAD_FILTER),
           Opc, Test[0].B_T, Test[1].B_T, GetArgType(0), GetArgType(1));
   return TRUE;
   } // end of Eval

@@ -12,7 +12,7 @@
 
   You should have received a copy of the GNU General Public License
   along with this program; if not, write to the Free Software
-  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA */
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02111-1301 USA */
 
 #define MYSQL_SERVER 1
 #include <my_global.h>
@@ -1820,6 +1820,8 @@ group_by_handler *spider_create_group_by_handler(
         {
           for (order = query->order_by; order; order = order->next)
           {
+            if ((*order->item)->type() == Item::SUM_FUNC_ITEM)
+              continue;
             if (spider_db_print_item_type((*order->item), NULL, spider, NULL, NULL, 0,
               roop_count, TRUE, fields_arg))
             {

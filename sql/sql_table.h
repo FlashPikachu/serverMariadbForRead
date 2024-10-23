@@ -19,6 +19,7 @@
 
 #include <my_sys.h>                             // pthread_mutex_t
 #include "m_string.h"                           // LEX_CUSTRING
+#include "lex_charset.h"
 
 #define ERROR_INJECT(code) \
   ((DBUG_IF("crash_" code) && (DBUG_SUICIDE(), 0)) || \
@@ -90,9 +91,6 @@ void build_lower_case_table_filename(char *buff, size_t bufflen,
                                      const LEX_CSTRING *table,
                                      uint flags);
 uint build_tmptable_filename(THD* thd, char *buff, size_t bufflen);
-bool mysql_create_table(THD *thd, TABLE_LIST *create_table,
-                        Table_specification_st *create_info,
-                        Alter_info *alter_info);
 bool add_keyword_to_query(THD *thd, String *result, const LEX_CSTRING *keyword,
                           const LEX_CSTRING *add);
 
@@ -135,36 +133,29 @@ bool add_keyword_to_query(THD *thd, String *result, const LEX_CSTRING *keyword,
 int mysql_create_table_no_lock(THD *thd,
                                DDL_LOG_STATE *ddl_log_state,
                                DDL_LOG_STATE *ddl_log_state_rm,
-                               const LEX_CSTRING *db,
-                               const LEX_CSTRING *table_name,
                                Table_specification_st *create_info,
                                Alter_info *alter_info, bool *is_trans,
                                int create_table_mode, TABLE_LIST *table);
 
-handler *mysql_create_frm_image(THD *thd,
-                                const LEX_CSTRING &db,
-                                const LEX_CSTRING &table_name,
-                                HA_CREATE_INFO *create_info,
-                                Alter_info *alter_info,
-                                int create_table_mode,
-                                KEY **key_info,
-                                uint *key_count,
+handler *mysql_create_frm_image(THD *thd, HA_CREATE_INFO *create_info,
+                                Alter_info *alter_info, int create_table_mode,
+                                KEY **key_info, uint *key_count,
                                 LEX_CUSTRING *frm);
 
-int mysql_discard_or_import_tablespace(THD *thd,
-                                       TABLE_LIST *table_list,
+int mysql_discard_or_import_tablespace(THD *thd, TABLE_LIST *table_list,
                                        bool discard);
 
 bool mysql_prepare_alter_table(THD *thd, TABLE *table,
-                               HA_CREATE_INFO *create_info,
+                               Table_specification_st *create_info,
                                Alter_info *alter_info,
                                Alter_table_ctx *alter_ctx);
 bool mysql_trans_prepare_alter_copy_data(THD *thd);
 bool mysql_trans_commit_alter_copy_data(THD *thd);
 bool mysql_alter_table(THD *thd, const LEX_CSTRING *new_db,
                        const LEX_CSTRING *new_name,
-                       HA_CREATE_INFO *create_info,
+                       Table_specification_st *create_info,
                        TABLE_LIST *table_list,
+                       class Recreate_info *recreate_info,
                        Alter_info *alter_info,
                        uint order_num, ORDER *order, bool ignore,
                        bool if_exists);
@@ -172,10 +163,8 @@ bool mysql_compare_tables(TABLE *table,
                           Alter_info *alter_info,
                           HA_CREATE_INFO *create_info,
                           bool *metadata_equal);
-bool mysql_recreate_table(THD *thd, TABLE_LIST *table_list, bool table_copy);
-bool mysql_create_like_table(THD *thd, TABLE_LIST *table,
-                             TABLE_LIST *src_table,
-                             Table_specification_st *create_info);
+bool mysql_recreate_table(THD *thd, TABLE_LIST *table_list,
+                          class Recreate_info *recreate_info, bool table_copy);
 bool mysql_rename_table(handlerton *base, const LEX_CSTRING *old_db,
                         const LEX_CSTRING *old_name, const LEX_CSTRING *new_db,
                         const LEX_CSTRING *new_name, LEX_CUSTRING *id,
@@ -226,5 +215,9 @@ uint explain_filename(THD* thd, const char *from, char *to, uint to_length,
 extern MYSQL_PLUGIN_IMPORT const LEX_CSTRING primary_key_name;
 
 bool check_engine(THD *, const char *, const char *, HA_CREATE_INFO *);
+
+#ifdef WITH_WSREP
+bool wsrep_check_sequence(THD* thd, const class sequence_definition *seq);
+#endif
 
 #endif /* SQL_TABLE_INCLUDED */

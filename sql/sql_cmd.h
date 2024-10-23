@@ -88,7 +88,8 @@ enum enum_sql_command {
   SQLCOM_SHOW_RELAYLOG_EVENTS,
   SQLCOM_GET_DIAGNOSTICS,
   SQLCOM_SLAVE_ALL_START, SQLCOM_SLAVE_ALL_STOP,
-  SQLCOM_SHOW_EXPLAIN, SQLCOM_SHUTDOWN,
+  SQLCOM_SHOW_EXPLAIN,
+  SQLCOM_SHOW_ANALYZE, SQLCOM_SHUTDOWN,
   SQLCOM_CREATE_ROLE, SQLCOM_DROP_ROLE, SQLCOM_GRANT_ROLE, SQLCOM_REVOKE_ROLE,
   SQLCOM_COMPOUND,
   SQLCOM_SHOW_GENERIC,
@@ -192,8 +193,7 @@ public:
   }
 
 protected:
-  Sql_cmd()
-  {}
+  Sql_cmd() = default;
 
   virtual ~Sql_cmd()
   {
@@ -261,8 +261,7 @@ public:
     m_handler(handler)
   {}
 
-  virtual ~Sql_cmd_call()
-  {}
+  virtual ~Sql_cmd_call() = default;
 
   /**
     Execute a CALL statement at runtime.

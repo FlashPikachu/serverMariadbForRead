@@ -1,3 +1,4 @@
+-- source include/no_valgrind_without_big.inc
 -- source include/have_big5.inc
 
 #
@@ -77,17 +78,19 @@ select hex(convert(_big5 0xC84041 using ucs2));
 set names big5;
 create table t1 (a blob);
 insert into t1 values (0xEE00);
+--disable_ps2_protocol
 select * into outfile 'test/t1.txt' from t1;
+--enable_ps2_protocol
 delete from t1;
 let $MYSQLD_DATADIR= `select @@datadir`;
 --replace_result $MYSQLD_DATADIR MYSQLD_DATADIR
---eval select hex(load_file('$MYSQLD_DATADIR/test/t1.txt'));
+--eval select hex(load_file('$MYSQLD_DATADIR/test/t1.txt')) as lf
 load data infile 't1.txt' into table t1;
 select hex(a) from t1;
 --remove_file $MYSQLD_DATADIR/test/t1.txt
 drop table t1;
-
---echo End of 5.0 tests
+#
+--echo # End of 5.0 tests
 
 
 --echo #
@@ -240,12 +243,14 @@ DROP TABLE t1;
 #
 # Checking binary->big5 conversion of an unassigned character 0xC840 in optimizer
 #
+--disable_service_connection
 SET NAMES binary;
 CREATE TABLE t1 (a VARCHAR(10) CHARACTER SET big5, KEY(a));
 INSERT INTO t1 VALUES (0xC840),(0xC841),(0xC842);
 SELECT HEX(a) FROM t1 WHERE a='È@';
 SELECT HEX(a) FROM t1 IGNORE KEY(a) WHERE a='È@';
 DROP TABLE t1;
+--enable_service_connection
 
 --echo #
 --echo # End of 10.0 tests

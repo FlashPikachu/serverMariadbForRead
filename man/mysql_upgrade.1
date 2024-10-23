@@ -1,6 +1,6 @@
 '\" t
 .\"
-.TH "\FBMYSQL_UPGRADE\FR" "1" "20 July 2020" "MariaDB 10\&.6" "MariaDB Database System"
+.TH "\FBMARIADB-UPGRADE\FR" "1" "20 July 2020" "MariaDB 10\&.9" "MariaDB Database System"
 .\" -----------------------------------------------------------------
 .\" * set default formatting
 .\" -----------------------------------------------------------------
@@ -15,7 +15,7 @@
 .\" upgrading MySQL
 .\" MySQL: upgrading
 .SH "NAME"
-mysql_upgrade \- check tables for MariaDB upgrade
+mariadb-upgrade \- check tables for MariaDB upgrade (mysql_upgrade is now a symlink to mariadb-upgrade)
 .SH "SYNOPSIS"
 .HP \w'\fBmysql_upgrade\ [\fR\fB\fIoptions\fR\fR\fB]\fR\ 'u
 \fBmysql_upgrade [\fR\fB\fIoptions\fR\fR\fB]\fR
@@ -656,7 +656,8 @@ The MariaDB user name to use when connecting to the server and not using the cur
 Display more output about the process\&. Using it twice will print connection 
 arguments; using it 3 times will print out all CHECK, RENAME and ALTER TABLE 
 commands used during the check phase; using it 4 times (added in MariaDB 10.0.14)
-will also write out all mysqlcheck commands used\&.
+will also write out all mariadb-check commands used; using it 5 times will print all
+the mariadb commands used and their results while running mysql_fix_privilege_tables script\&.
 .RE
 .sp
 .RS 4

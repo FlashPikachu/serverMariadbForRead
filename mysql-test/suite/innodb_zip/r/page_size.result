@@ -44,6 +44,7 @@ test/t1	DEFAULT	DEFAULT	MYSQLD_DATADIR/test/t1.ibd
 test/t2	DEFAULT	DEFAULT	MYSQLD_DATADIR/test/t2.ibd
 test/t3	DEFAULT	8192	MYSQLD_DATADIR/test/t3.ibd
 test/t4	DEFAULT	DEFAULT	MYSQLD_DATADIR/test/t4.ibd
+innodb_temporary	DEFAULT	DEFAULT	MYSQLD_DATADIR/ibtmp1
 DROP TABLE t1, t2, t3, t4;
 # Test 4) The maximum row size is dependent upon the page size.
 #         Each row format has its own amount of overhead that
@@ -367,7 +368,7 @@ t1	CREATE TABLE `t1` (
   `d` text NOT NULL,
   PRIMARY KEY (`a`,`b`(255),`c`(255)),
   KEY `b` (`b`(767))
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3 STATS_PERSISTENT=0
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3 COLLATE=utf8mb3_general_ci STATS_PERSISTENT=0
 CHECK TABLE t1;
 Table	Op	Msg_type	Msg_text
 test.t1	check	status	OK
@@ -485,7 +486,7 @@ t1	CREATE TABLE `t1` (
   KEY `t1u` (`u`(767)),
   KEY `t1ut` (`u`(767),`t`(767)),
   KEY `t1st` (`s`(767),`t`(767))
-) ENGINE=InnoDB DEFAULT CHARSET=latin1 ROW_FORMAT=DYNAMIC
+) ENGINE=InnoDB DEFAULT CHARSET=latin1 COLLATE=latin1_swedish_ci ROW_FORMAT=DYNAMIC
 DROP TABLE t1;
 # Bug#12547647 UPDATE LOGGING COULD EXCEED LOG PAGE SIZE
 CREATE TABLE bug12547647(
@@ -595,3 +596,37 @@ CREATE TABLE t1(c text, PRIMARY KEY (c(293)))
 ENGINE=InnoDB ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=1 CHARSET=ASCII;
 INSERT INTO t1 VALUES(REPEAT('A',512)),(REPEAT('B',512));
 DROP TABLE t1;
+#
+# MDEV-28950 Assertion `*err == DB_SUCCESS' in btr_page_split_and_insert
+#
+CREATE TABLE t1(c CHAR(255) NOT NULL) ENGINE=InnoDB;
+INSERT INTO t1 VALUES ('');
+ALTER TABLE t1 ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=1;
+INSERT INTO t1 VALUES (''),(''),('');
+SET @save_innodb_compression_level= @@innodb_compression_level;
+SET GLOBAL innodb_compression_level=0;
+INSERT INTO t1 VALUES ('');
+SET GLOBAL innodb_compression_level= @save_innodb_compression_level;
+DROP TABLE t1;
+#
+# MDEV-31158 Assertion ...MTR_MEMO_X_LOCKED in btr_attach_half_pages()
+#
+SET @save_compression_level=@@GLOBAL.innodb_compression_level;
+SET GLOBAL innodb_compression_level=0;
+CREATE TEMPORARY TABLE t(a SERIAL, prefix VARBINARY(4), pad INT);
+INSERT INTO t(prefix, pad) VALUES
+(_binary 0xff,160),('',19),(_binary 0x0001,253),(_binary 0x0b11,169),
+(_binary 0x0b010001,23),(_binary 0x0b100001,251),(_binary 0x0d,163),
+(_binary 0xb3,254),(_binary 0x96,254),(_binary 0xeb,61),
+(_binary 0xf231,253),(_binary 0x1db0,253),(_binary 0x0005,101),
+(_binary 0x6370,253),(_binary 0x0b12,112),(_binary 0x0b010002,23),
+(_binary 0x0b100002,80),(_binary 0x181984,163),(_binary 0x181926,168),
+(_binary 0xe1,176),(_binary 0xe2,187),(_binary 0xe6,254),(_binary 0xbb,51),
+(_binary 0x1c,248),(_binary 0x8a,94),(_binary 0x14,254);
+CREATE TABLE u(a SMALLINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
+b VARBINARY(255), KEY(b)) ENGINE=InnoDB
+KEY_BLOCK_SIZE=1 ROW_FORMAT=COMPRESSED;
+INSERT INTO u SELECT a,CONCAT(prefix,REPEAT(chr(0),pad)) FROM t;
+DROP TABLE u, t;
+SET GLOBAL innodb_compression_level=@save_compression_level;
+# End of 10.6 tests

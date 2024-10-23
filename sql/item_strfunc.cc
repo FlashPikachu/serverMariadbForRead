@@ -1348,13 +1348,13 @@ bool Item_func_sformat::fix_length_and_dec(THD *thd)
 
   for (uint i=0 ; i < arg_count ; i++)
   {
-    char_length+= args[i]->max_char_length();
     if (args[i]->result_type() == STRING_RESULT &&
         Type_std_attributes::agg_item_set_converter(c, func_name_cstring(),
                                                     args+i, 1, flags, 1))
       return TRUE;
   }
 
+  char_length= MAX_BLOB_WIDTH;
   fix_char_length_ulonglong(char_length);
   return FALSE;
 }
@@ -1756,6 +1756,18 @@ bool Item_func_ucase::fix_length_and_dec(THD *thd)
   converter= collation.collation->cset->caseup;
   fix_char_length_ulonglong((ulonglong) args[0]->max_char_length() * multiply);
   return FALSE;
+}
+
+
+bool Item_func_left::hash_not_null(Hasher *hasher)
+{
+  StringBuffer<STRING_BUFFER_USUAL_SIZE> buf;
+  String *str= val_str(&buf);
+  DBUG_ASSERT((str == NULL) == null_value);
+  if (!str)
+    return true;
+  hasher->add(collation.collation, str->ptr(), str->length());
+  return false;
 }
 
 
@@ -3653,8 +3665,12 @@ String *Item_func_conv::val_str(String *str)
                                                 from_base, &endptr, &err);
   }
 
+  uint dummy_errors;
   if (!(ptr= longlong2str(dec, ans, to_base)) ||
-      str->copy(ans, (uint32) (ptr - ans), default_charset()))
+      (collation.collation->state & MY_CS_NONASCII) ?
+       str->copy(ans, (uint32)  (ptr - ans), &my_charset_latin1,
+                 collation.collation, &dummy_errors) :
+       str->copy(ans, (uint32) (ptr - ans), collation.collation))
   {
     null_value= 1;
     return NULL;
@@ -3872,6 +3888,7 @@ String *Item_func_weight_string::val_str(String *str)
                            weigth_flags);
   DBUG_ASSERT(frm_length <= tmp_length);
 
+  str->set_charset(&my_charset_bin);
   str->length(frm_length);
   null_value= 0;
   return str;
@@ -3951,6 +3968,7 @@ String *Item_func_unhex::val_str(String *str)
 
   from= res->ptr();
   null_value= 0;
+  str->set_charset(&my_charset_bin);
   str->length(length);
   to= (char*) str->ptr();
   if (res->length() % 2)
@@ -4480,6 +4498,7 @@ String *Item_func_compress::val_str(String *str)
   }
 
   str->length((uint32)new_size + 4);
+  str->set_charset(&my_charset_bin);
   return str;
 }
 
@@ -5726,8 +5745,8 @@ bool Item_func_natural_sort_key::check_vcol_func_processor(void *arg)
 }
 
 #ifdef WITH_WSREP
-
 #include "wsrep_mysqld.h"
+#include "wsrep_server_state.h"
 /* Format is %d-%d-%llu */
 #define WSREP_MAX_WSREP_SERVER_GTID_STR_LEN 10+1+10+1+20
 

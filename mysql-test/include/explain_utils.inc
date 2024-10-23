@@ -26,7 +26,8 @@
 --echo # query:  $query
 --echo # select: $select
 --echo #
-
+--disable_ps2_protocol
+--disable_view_protocol
 if ($select) {
 --enable_prepare_warnings
 --disable_query_log
@@ -163,3 +164,5 @@ SHOW STATUS WHERE (Variable_name LIKE 'Sort%' OR
 --enable_query_log
 
 --echo
+--enable_view_protocol
+--enable_ps2_protocol

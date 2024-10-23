@@ -11,7 +11,7 @@
 
   You should have received a copy of the GNU General Public License
   along with this program; if not, write to the Free Software
-	Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA */
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA */
 
 /**
   @file ha_connect.cc
@@ -266,7 +266,7 @@ bool    Force_Bson(void);
 size_t  GetWorkSize(void);
 void    SetWorkSize(size_t);
 extern "C" const char *msglang(void);
-
+static char *strz(PGLOBAL g, LEX_CSTRING &ls);
 static void PopUser(PCONNECT xp);
 static PCONNECT GetUser(THD *thd, PCONNECT xp);
 static PGLOBAL  GetPlug(THD *thd, PCONNECT& lxp);
@@ -540,11 +540,7 @@ extern "C" const char *msglang(void)
 #else   // !XMSG && !NEWMSG
 extern "C" const char *msglang(void)
 {
-#if defined(FRENCH)
-  return "french";
-#else  // DEFAULT
   return "english";
-#endif // DEFAULT
 } // end of msglang
 #endif  // !XMSG && !NEWMSG
 
@@ -1301,10 +1297,10 @@ PCSZ GetStringTableOption(PGLOBAL g, PTOS options, PCSZ opname, PCSZ sdef)
 		opval= options->filter;
 	else if (!stricmp(opname, "Data_charset"))
     opval= options->data_charset;
-	else if (!stricmp(opname, "Http") || !stricmp(opname, "URL"))
-		opval= options->http;
-	else if (!stricmp(opname, "Uri"))
-		opval= options->uri;
+  else if (!stricmp(opname, "Http") || !stricmp(opname, "URL"))
+    opval= options->http;
+  else if (!stricmp(opname, "Uri"))
+    opval= options->uri;
 
   if (!opval && options->oplist)
     opval= GetListOption(g, opname, options->oplist);
@@ -1403,7 +1399,8 @@ char *ha_connect::GetRealString(PCSZ s)
 
   if (IsPartitioned() && s && *partname) {
     sv= (char*)PlugSubAlloc(xp->g, NULL, 0);
-    sprintf(sv, s, partname);
+    PPOOLHEADER pph = (PPOOLHEADER)xp->g->Sarea;
+    snprintf(sv, xp->g->Sarea_Size - pph->To_Free, s, partname);
     PlugSubAlloc(xp->g, NULL, strlen(sv) + 1);
   } else
     sv= (char*)s;
@@ -1617,15 +1614,7 @@ void *ha_connect::GetColumnOption(PGLOBAL g, void *field, PCOLINFO pcf)
   pcf->Scale= 0;
   pcf->Opt= (fop) ? (int)fop->opt : 0;
 
-//	if (fp->field_length >= 0) {
-		pcf->Length= fp->field_length;
-
-		// length is bytes for Connect, not characters
-		if (!strnicmp(chset, "utf8", 4))
-			pcf->Length /= 3;
-
-//	} else
-//		pcf->Length= 256;            // BLOB?
+  pcf->Length= fp->field_length;
 
   pcf->Precision= pcf->Length;
 
@@ -1881,7 +1870,7 @@ bool ha_connect::CheckVirtualIndex(TABLE_SHARE *s)
       rid= (fp->option_struct) ? fp->option_struct->special : NULL;
 
       if (!rid || (stricmp(rid, "ROWID") && stricmp(rid, "ROWNUM"))) {
-        strcpy(g->Message, "Invalid virtual index");
+        snprintf(g->Message, sizeof(g->Message), "Invalid virtual index");
         return true;
         } // endif rowid
 
@@ -2027,7 +2016,7 @@ int ha_connect::OpenTable(PGLOBAL g, bool del)
       case MODE_INSERT:
       case MODE_UPDATE:
       case MODE_DELETE:
-        strcpy(g->Message, MSG(READ_ONLY));
+        snprintf(g->Message, sizeof(g->Message), MSG(READ_ONLY));
         return HA_ERR_TABLE_READONLY;
       default:
         break;
@@ -2085,7 +2074,7 @@ int ha_connect::OpenTable(PGLOBAL g, bool del)
             // Trying to update a column used for partitioning
             // This cannot be currently done because it may require
             // a row to be moved in another partition.
-            sprintf(g->Message, 
+            snprintf(g->Message, sizeof(g->Message),
               "Cannot update column %s because it is used for partitioning",
               p);
             return HA_ERR_INTERNAL_ERROR;
@@ -2140,7 +2129,7 @@ bool ha_connect::CheckColumnList(PGLOBAL g)
           for (field= table->field; (fp= *field); field++)
       if (bitmap_is_set(map, fp->field_index)) {
         if (!(colp= tdbp->ColDB(g, (PSZ)fp->field_name.str, 0))) {
-          sprintf(g->Message, "Column %s not found in %s", 
+          snprintf(g->Message, sizeof(g->Message), "Column %s not found in %s",
                   fp->field_name.str, tdbp->GetName());
 					throw 1;
 				} // endif colp
@@ -2156,7 +2145,7 @@ bool ha_connect::CheckColumnList(PGLOBAL g)
 			htrc("Exception %d: %s\n", n, g->Message);
 		brc= true;
 	} catch (const char *msg) {
-		strcpy(g->Message, msg);
+		snprintf(g->Message, sizeof(g->Message), "%s", msg);
 		brc= true;
 	} // end catch
 
@@ -2299,7 +2288,7 @@ int ha_connect::MakeRecord(char *buf)
           char buf[256];
           THD *thd= ha_thd();
 
-          sprintf(buf, "Out of range value %.140s for column '%s' at row %ld",
+          snprintf(buf, sizeof(buf), "Out of range value %.140s for column '%s' at row %ld",
             value->GetCharString(val),
             fp->field_name.str,
             thd->get_stmt_da()->current_row_for_warning());
@@ -2525,7 +2514,7 @@ bool ha_connect::MakeKeyWhere(PGLOBAL g, PSTRG qry, OPVAL vop, char q,
 	ranges[1]= (end_range && !eq_range) ? &save_end_range : NULL;
 
 	if (!ranges[0] && !ranges[1]) {
-		strcpy(g->Message, "MakeKeyWhere: No key");
+		snprintf(g->Message, sizeof(g->Message), "MakeKeyWhere: No key");
 	  return true;
 	}	else
 		both= ranges[0] && ranges[1];
@@ -2581,7 +2570,7 @@ bool ha_connect::MakeKeyWhere(PGLOBAL g, PSTRG qry, OPVAL vop, char q,
 				op= OP_LE;
 				break;
 			default:
-				sprintf(g->Message, "cannot handle flag %d", ranges[i]->flag);
+				snprintf(g->Message, sizeof(g->Message), "cannot handle flag %d", ranges[i]->flag);
 				goto err;
 			}	// endswitch flag
 
@@ -2622,7 +2611,7 @@ bool ha_connect::MakeKeyWhere(PGLOBAL g, PSTRG qry, OPVAL vop, char q,
 	qry->Append(')');
 
   if ((oom= qry->IsTruncated()))
-    strcpy(g->Message, "Out of memory");
+    snprintf(g->Message, sizeof(g->Message), "Out of memory");
 
 	dbug_tmp_restore_column_map(&table->write_set, old_map);
 	return oom;
@@ -3079,6 +3068,8 @@ PCFIL ha_connect::CheckCond(PGLOBAL g, PCFIL filp, const Item *cond)
 
       if ((iscol= args[i]->type() == COND::FIELD_ITEM)) {
         const char *fnm;
+        char buf[MAX_FIELD_WIDTH];
+        String strColumn(buf, sizeof(buf), system_charset_info);
         ha_field_option_struct *fop;
         Item_field *pField= (Item_field *)args[i];
 
@@ -3104,8 +3095,14 @@ PCFIL ha_connect::CheckCond(PGLOBAL g, PCFIL filp, const Item *cond)
 					return NULL;
 				} else {
 					bool h;
-
 					fnm= filp->Chk(pField->field->field_name.str, &h);
+          if (tty == TYPE_AM_MYSQL && !(x || ismul))
+          {
+            strColumn.length(0);
+            strColumn.qs_append(STRING_WITH_LEN("`"));
+            strColumn.qs_append(fnm, strlen(fnm));
+            strColumn.append(STRING_WITH_LEN("`"));
+          }
 
 					if (h && i && !ishav)
 						return NULL;			// Having should be	col VOP arg
@@ -3119,9 +3116,11 @@ PCFIL ha_connect::CheckCond(PGLOBAL g, PCFIL filp, const Item *cond)
           htrc("Field name=%s\n", pField->field->field_name.str);
           htrc("Field type=%d\n", pField->field->type());
           htrc("Field_type=%d\n", args[i]->field_type());
-          } // endif trace
-
-        strcat((ishav ? havg : body), fnm);
+        } // endif trace
+        if (tty == TYPE_AM_MYSQL && !(x || ismul))
+          strcat((ishav ? havg : body), strColumn.ptr());
+        else
+          strcat((ishav ? havg : body), fnm);
       } else if (args[i]->type() == COND::FUNC_ITEM) {
         if (tty == TYPE_AM_MYSQL) {
           if (!CheckCond(g, filp, args[i]))
@@ -3386,7 +3385,7 @@ const COND *ha_connect::cond_push(const COND *cond)
 			if (trace(1))
 				htrc("Exception %d: %s\n", n, g->Message);
 		} catch (const char *msg) {
-			strcpy(g->Message, msg);
+			snprintf(g->Message, sizeof(g->Message), "%s", msg);
 		} // end catch
 
 	fin:;
@@ -3612,7 +3611,7 @@ int ha_connect::optimize(THD* thd, HA_CHECK_OPT*)
 			htrc("Exception %d: %s\n", n, g->Message);
 		rc= HA_ERR_INTERNAL_ERROR;
 	} catch (const char *msg) {
-		strcpy(g->Message, msg);
+		snprintf(g->Message, sizeof(g->Message), "%s", msg);
 		rc= HA_ERR_INTERNAL_ERROR;
 	} // end catch
 
@@ -4712,7 +4711,7 @@ MODE ha_connect::CheckMode(PGLOBAL g, THD *thd,
 				break;
 			default:
         htrc("Unsupported sql_command=%d\n", thd_sql_command(thd));
-        strcpy(g->Message, "CONNECT Unsupported command");
+        snprintf(g->Message, sizeof(g->Message), "CONNECT Unsupported command");
         my_message(ER_NOT_ALLOWED_COMMAND, g->Message, MYF(0));
         newmode= MODE_ERROR;
         break;
@@ -4770,7 +4769,7 @@ MODE ha_connect::CheckMode(PGLOBAL g, THD *thd,
         break;
       default:
         htrc("Unsupported sql_command=%d\n", thd_sql_command(thd));
-        strcpy(g->Message, "CONNECT Unsupported command");
+        snprintf(g->Message, sizeof(g->Message), "CONNECT Unsupported command");
         my_message(ER_NOT_ALLOWED_COMMAND, g->Message, MYF(0));
         newmode= MODE_ERROR;
         break;
@@ -4903,7 +4902,7 @@ int ha_connect::external_lock(THD *thd, int lock_type)
                            && sqlcom != SQLCOM_FLUSH
                            && sqlcom != SQLCOM_BEGIN
                            && sqlcom != SQLCOM_DROP_TABLE) {
-      sprintf(g->Message, "external_lock: unexpected command %d", sqlcom);
+      snprintf(g->Message, sizeof(g->Message), "external_lock: unexpected command %d", sqlcom);
       push_warning(thd, Sql_condition::WARN_LEVEL_WARN, ER_UNKNOWN_ERROR, g->Message);
       DBUG_RETURN(0);
     } else if (g->Xchk) {
@@ -4913,7 +4912,7 @@ int ha_connect::external_lock(THD *thd, int lock_type)
 					push_warning(thd, Sql_condition::WARN_LEVEL_WARN, ER_UNKNOWN_ERROR, g->Message);
 					DBUG_RETURN(0);
 				} else if (!tdbp->GetDef()->Indexable()) {
-          sprintf(g->Message, "external_lock: Table %s is not indexable", tdbp->GetName());
+          snprintf(g->Message, sizeof(g->Message), "external_lock: Table %s is not indexable", tdbp->GetName());
 //        DBUG_RETURN(HA_ERR_INTERNAL_ERROR);  causes assert error
           push_warning(thd, Sql_condition::WARN_LEVEL_WARN, ER_UNKNOWN_ERROR, g->Message);
           DBUG_RETURN(0);
@@ -5025,7 +5024,7 @@ int ha_connect::external_lock(THD *thd, int lock_type)
     xmod= MODE_ANY;              // For info commands
     DBUG_RETURN(rc);
 	} else if (check_privileges(thd, options, table->s->db.str)) {
-		strcpy(g->Message, "This operation requires the FILE privilege");
+		snprintf(g->Message, sizeof(g->Message), "This operation requires the FILE privilege");
 		htrc("%s\n", g->Message);
 		DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
 	} // endif check_privileges
@@ -5391,7 +5390,7 @@ bool CheckSelf(PGLOBAL g, TABLE_SHARE *s, PCSZ host,
   else if (port && port != (signed)GetDefaultPort())
     return false;
 
-  strcpy(g->Message, "This MySQL table is defined on itself");
+  snprintf(g->Message, sizeof(g->Message), "This MySQL table is defined on itself");
   return true;
 } // end of CheckSelf
 
@@ -5662,7 +5661,7 @@ static int connect_assisted_discovery(handlerton *, THD* thd,
   String   sql(buf, sizeof(buf), system_charset_info);
 
   sql.copy(STRING_WITH_LEN("CREATE TABLE whatever ("), system_charset_info);
-	user= host= pwd= tbl= src= col= ocl= pic= fcl= skc= rnk= zfn= NULL;
+  user= host= pwd= tbl= src= col= ocl= pic= fcl= skc= rnk= zfn= NULL;
 	dsn= url= NULL;
 
   // Get the useful create options
@@ -5714,7 +5713,7 @@ static int connect_assisted_discovery(handlerton *, THD* thd,
 #if defined(ZIP_SUPPORT)
 		zfn= GetListOption(g, "Zipfile", topt->oplist, NULL);
 #endif   // ZIP_SUPPORT
-	} else {
+  } else {
     host= "localhost";
     user= ((ttp == TAB_ODBC || ttp == TAB_JDBC) ? NULL : "root");
   } // endif option_list
@@ -5737,7 +5736,7 @@ static int connect_assisted_discovery(handlerton *, THD* thd,
 		} else if (topt->http) {
       if (ttp == TAB_UNDEF) {
         ttr= TAB_JSON;
-        strcpy(g->Message, "No table_type. Was set to JSON");
+        snprintf(g->Message, sizeof(g->Message), "No table_type. Was set to JSON");
         push_warning(thd, Sql_condition::WARN_LEVEL_NOTE, ER_UNKNOWN_ERROR, g->Message);
       } else
         ttr= ttp;
@@ -5770,7 +5769,7 @@ static int connect_assisted_discovery(handlerton *, THD* thd,
         case TAB_BSON:
 #endif   // BSON_SUPPORT
           if (checkPrivileges(thd, ttp, topt, db)) {
-            strcpy(g->Message, "This operation requires the FILE privilege");
+            snprintf(g->Message, sizeof(g->Message), "This operation requires the FILE privilege");
             rc= HA_ERR_INTERNAL_ERROR;
             goto err;
           } // endif check_privileges
@@ -5786,7 +5785,7 @@ static int connect_assisted_discovery(handlerton *, THD* thd,
 				char *p;
 
 				if (!tbl) {
-					strcpy(g->Message, "Missing table list");
+					snprintf(g->Message, sizeof(g->Message), "Missing table list");
 					rc= HA_ERR_INTERNAL_ERROR;
 					goto err;
 				} // endif tbl
@@ -5824,7 +5823,7 @@ static int connect_assisted_discovery(handlerton *, THD* thd,
 #endif   // PROMPT_OK
 
 				} else if (!dsn) {
-					sprintf(g->Message, "Missing %s connection string", topt->type);
+					snprintf(g->Message, sizeof(g->Message), "Missing %s connection string", topt->type);
 				} else {
 					// Store ODBC additional parameters
 					sop= (POPARM)PlugSubAlloc(g, NULL, sizeof(ODBCPARM));
@@ -5844,24 +5843,24 @@ static int connect_assisted_discovery(handlerton *, THD* thd,
 				if (fnc & FNC_DRIVER) {
 					ok= true;
 				} else if (!(url= strz(g, create_info->connect_string))) {
-					strcpy(g->Message, "Missing URL");
+					snprintf(g->Message, sizeof(g->Message), "Missing URL");
 				} else {
 					// Store JDBC additional parameters
 					int      rc;
 					PJDBCDEF jdef= new(g) JDBCDEF();
 
 					jdef->SetName(create_info->alias.str);
-					sjp = (PJPARM)PlugSubAlloc(g, NULL, sizeof(JDBCPARM));
-					sjp->Driver = driver;
-					//		sjp->Properties = prop;
-					sjp->Fsize = 0;
-					sjp->Scrollable = false;
+					sjp= (PJPARM)PlugSubAlloc(g, NULL, sizeof(JDBCPARM));
+					sjp->Driver= driver;
+					//		sjp->Properties= prop;
+					sjp->Fsize= 0;
+					sjp->Scrollable= false;
 
-					if ((rc = jdef->ParseURL(g, url, false)) == RC_OK) {
-						sjp->Url = url;
-						sjp->User = (char*)user;
-						sjp->Pwd = (char*)pwd;
-						ok = true;
+					if ((rc= jdef->ParseURL(g, url, false)) == RC_OK) {
+						sjp->Url= url;
+						sjp->User= (char*)user;
+						sjp->Pwd= (char*)pwd;
+						ok= true;
 					} else if (rc == RC_NF) {
 						if (jdef->GetTabname())
 							tab= (char*)jdef->GetTabname();
@@ -5879,9 +5878,9 @@ static int connect_assisted_discovery(handlerton *, THD* thd,
 				// fall through
 			case TAB_CSV:
 				if (!fn && fnc != FNC_NO)
-					sprintf(g->Message, "Missing %s file name", topt->type);
+					snprintf(g->Message, sizeof(g->Message), "Missing %s file name", topt->type);
 				else if (sep && strlen(sep) > 1)
-					sprintf(g->Message, "Invalid separator %s", sep);
+					snprintf(g->Message, sizeof(g->Message), "Invalid separator %s", sep);
 				else
 					ok= true;
 
@@ -5939,7 +5938,7 @@ static int connect_assisted_discovery(handlerton *, THD* thd,
 			case TAB_OCCUR:
 				if (!src && !stricmp(tab, create_info->alias.str) &&
 					(!db || !stricmp(db, table_s->db.str)))
-					sprintf(g->Message, "A %s table cannot refer to itself", topt->type);
+					snprintf(g->Message, sizeof(g->Message), "A %s table cannot refer to itself", topt->type);
 				else
 					ok= true;
 
@@ -5948,7 +5947,7 @@ static int connect_assisted_discovery(handlerton *, THD* thd,
 				if (topt->module && topt->subtype)
 					ok= true;
 				else
-					strcpy(g->Message, "Missing OEM module or subtype");
+					snprintf(g->Message, sizeof(g->Message), "Missing OEM module or subtype");
 
 				break;
 #if defined(LIBXML2_SUPPORT) || defined(DOMDOC_SUPPORT)
@@ -5961,7 +5960,7 @@ static int connect_assisted_discovery(handlerton *, THD* thd,
         dsn= strz(g, create_info->connect_string);
 
 				if (!fn && !zfn && !mul && !dsn)
-					sprintf(g->Message, "Missing %s file name", topt->type);
+					snprintf(g->Message, sizeof(g->Message), "Missing %s file name", topt->type);
 				else if (dsn && !topt->tabname)
           topt->tabname= tab;
 
@@ -5976,11 +5975,11 @@ static int connect_assisted_discovery(handlerton *, THD* thd,
 				break;
 #endif   // JAVA_SUPPORT
 #if defined(REST_SUPPORT)
-			case TAB_REST:
-				if (!topt->http)
-					strcpy(g->Message, "Missing REST HTTP option");
-				else
-					ok = true;
+      case TAB_REST:
+        if (!topt->http)
+          sprintf(g->Message, "Missing %s HTTP address", topt->type);
+        else
+          ok= true;
 
 				break;
 #endif   // REST_SUPPORT
@@ -5988,19 +5987,19 @@ static int connect_assisted_discovery(handlerton *, THD* thd,
 				ok= true;
 				break;
 			default:
-				sprintf(g->Message, "Cannot get column info for table type %s", topt->type);
+				snprintf(g->Message, sizeof(g->Message), "Cannot get column info for table type %s", topt->type);
 				break;
 		} // endif ttp
 
 	// Check for supported catalog function
 		if (ok && !(supfnc & fnc)) {
-			sprintf(g->Message, "Unsupported catalog function %s for table type %s",
+			snprintf(g->Message, sizeof(g->Message), "Unsupported catalog function %s for table type %s",
 				fncn, topt->type);
 			ok= false;
 		} // endif supfnc
 
 		if (src && fnc != FNC_NO) {
-			strcpy(g->Message, "Cannot make catalog table from srcdef");
+			snprintf(g->Message, sizeof(g->Message), "Cannot make catalog table from srcdef");
 			ok= false;
 		} // endif src
 
@@ -6050,7 +6049,7 @@ static int connect_assisted_discovery(handlerton *, THD* thd,
 							qrp= ODBCDrivers(g, mxr, true);
 							break;
 						default:
-							sprintf(g->Message, "invalid catfunc %s", fncn);
+							snprintf(g->Message, sizeof(g->Message), "invalid catfunc %s", fncn);
 							break;
 					} // endswitch info
 
@@ -6081,7 +6080,7 @@ static int connect_assisted_discovery(handlerton *, THD* thd,
 							qrp= JDBCDrivers(g, mxr, true);
 							break;
 						default:
-							sprintf(g->Message, "invalid catfunc %s", fncn);
+							snprintf(g->Message, sizeof(g->Message), "invalid catfunc %s", fncn);
 							break;
 					} // endswitch info
 
@@ -6144,15 +6143,15 @@ static int connect_assisted_discovery(handlerton *, THD* thd,
 					break;
 #endif   // LIBXML2_SUPPORT  ||         DOMDOC_SUPPORT
 #if defined(REST_SUPPORT)
-				case TAB_REST:
-					qrp = RESTColumns(g, topt, tab, (char *)db, fnc == FNC_COL);
-					break;
+         case TAB_REST:
+           qrp= RESTColumns(g, topt, tab, (char *)db, fnc == FNC_COL);
+           break;
 #endif   // REST_SUPPORT
-				case TAB_OEM:
+        case TAB_OEM:
 					qrp= OEMColumns(g, topt, tab, (char*)db, fnc == FNC_COL);
 					break;
 				default:
-					strcpy(g->Message, "System error during assisted discovery");
+					snprintf(g->Message, sizeof(g->Message), "System error during assisted discovery");
 					break;
 			} // endswitch ttp
 
@@ -6188,9 +6187,9 @@ static int connect_assisted_discovery(handlerton *, THD* thd,
 				// Not a catalog table
 				if (!qrp->Nblin) {
 					if (tab)
-						sprintf(g->Message, "Cannot get columns from %s", tab);
+						snprintf(g->Message, sizeof(g->Message), "Cannot get columns from %s", tab);
 					else
-						strcpy(g->Message, "Fail to retrieve columns");
+						strncpy(g->Message, "Fail to retrieve columns", sizeof(g->Message));
 
 					rc= HA_ERR_INTERNAL_ERROR;
 					goto err;
@@ -6277,7 +6276,7 @@ static int connect_assisted_discovery(handlerton *, THD* thd,
 #if defined(ODBC_SUPPORT) || defined(JAVA_SUPPORT)
 								if ((ttp == TAB_ODBC || ttp == TAB_JDBC) && crp->Kdata) {
 									if (schem && stricmp(schem, crp->Kdata->GetCharValue(i))) {
-										sprintf(g->Message,
+										snprintf(g->Message, sizeof(g->Message),
 											"Several %s tables found, specify DBNAME", tab);
 										rc= HA_ERR_INTERNAL_ERROR;
 										goto err;
@@ -6299,12 +6298,12 @@ static int connect_assisted_discovery(handlerton *, THD* thd,
 						if (!(plgtyp= TranslateSQLType(typ, dec, prec, v, w))) {
 							if (GetTypeConv() == TPC_SKIP) {
 								// Skip this column
-								sprintf(g->Message, "Column %s skipped (unsupported type %d)",
+								snprintf(g->Message, sizeof(g->Message), "Column %s skipped (unsupported type %d)",
 									cnm, typ);
 								push_warning(thd, Sql_condition::WARN_LEVEL_WARN, ER_UNKNOWN_ERROR, g->Message);
 								continue;
 							} else {
-								sprintf(g->Message, "Unsupported SQL type %d", typ);
+								snprintf(g->Message, sizeof(g->Message), "Unsupported SQL type %d", typ);
 								rc= HA_ERR_INTERNAL_ERROR;
 								goto err;
 							} // endif type_conv
@@ -6315,7 +6314,7 @@ static int connect_assisted_discovery(handlerton *, THD* thd,
 						switch (typ) {
 							case TYPE_STRING:
 								if (w) {
-									sprintf(g->Message, "Column %s is wide characters", cnm);
+									snprintf(g->Message, sizeof(g->Message), "Column %s is wide characters", cnm);
 									push_warning(thd, Sql_condition::WARN_LEVEL_NOTE, ER_UNKNOWN_ERROR, g->Message);
 								} // endif w
 
@@ -6341,12 +6340,12 @@ static int connect_assisted_discovery(handlerton *, THD* thd,
 							if (!(plgtyp= TranslateJDBCType(typ, tn, dec, prec, v))) {
 								if (GetTypeConv() == TPC_SKIP) {
 									// Skip this column
-									sprintf(g->Message, "Column %s skipped (unsupported type %d)",
+									snprintf(g->Message, sizeof(g->Message), "Column %s skipped (unsupported type %d)",
 										cnm, typ);
 									push_warning(thd, Sql_condition::WARN_LEVEL_WARN, ER_UNKNOWN_ERROR, g->Message);
 									continue;
 								} else {
-									sprintf(g->Message, "Unsupported SQL type %d", typ);
+									snprintf(g->Message, sizeof(g->Message), "Unsupported SQL type %d", typ);
 									rc= HA_ERR_INTERNAL_ERROR;
 									goto err;
 								} // endif type_conv
@@ -6396,7 +6395,7 @@ static int connect_assisted_discovery(handlerton *, THD* thd,
 			htrc("Exception %d: %s\n", n, g->Message);
 		rc= HA_ERR_INTERNAL_ERROR;
 	} catch (const char *msg) {
-		strcpy(g->Message, msg);
+		snprintf(g->Message, sizeof(g->Message), "%s", msg);
 		rc= HA_ERR_INTERNAL_ERROR;
 	} // end catch
 
@@ -6465,7 +6464,7 @@ int ha_connect::create(const char *name, TABLE *table_arg,
   TABTYPE type;
   TABLE  *st= table;                       // Probably unuseful
   THD    *thd= ha_thd();
-  LEX_CSTRING cnc = table_arg->s->connect_string;
+  LEX_CSTRING cnc= table_arg->s->connect_string;
   myf utf8_flag= thd->get_utf8_flag();
 #if defined(WITH_PARTITION_STORAGE_ENGINE)
   partition_info *part_info= table_arg->part_info;
@@ -6505,13 +6504,13 @@ int ha_connect::create(const char *name, TABLE *table_arg,
 #endif   // REST_SUPPORT
                    (options->tabname) ? "PROXY" : "DOS";
     type= GetTypeID(options->type);
-    sprintf(g->Message, "No table_type. Will be set to %s", options->type);
+    snprintf(g->Message, sizeof(g->Message), "No table_type. Will be set to %s", options->type);
 
     if (sqlcom == SQLCOM_CREATE_TABLE)
       push_warning(thd, Sql_condition::WARN_LEVEL_WARN, ER_UNKNOWN_ERROR, g->Message);
 
   } else if (type == TAB_NIY) {
-    sprintf(g->Message, "Unsupported table type %s", options->type);
+    snprintf(g->Message, sizeof(g->Message), "Unsupported table type %s", options->type);
     my_message(ER_UNKNOWN_ERROR, g->Message, MYF(0));
     DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
   } // endif ttp
@@ -6556,20 +6555,20 @@ int ha_connect::create(const char *name, TABLE *table_arg,
       case TAB_PIVOT:
       case TAB_OCCUR:
         if (options->srcdef) {
-          strcpy(g->Message, "Cannot check looping reference");
+          snprintf(g->Message, sizeof(g->Message), "Cannot check looping reference");
           push_warning(thd, Sql_condition::WARN_LEVEL_WARN, ER_UNKNOWN_ERROR, g->Message);
         } else if (options->tabname) {
           if (!stricmp(options->tabname, create_info->alias.str) &&
              (!options->dbname || 
               !stricmp(options->dbname, table_arg->s->db.str))) {
-            sprintf(g->Message, "A %s table cannot refer to itself",
+            snprintf(g->Message, sizeof(g->Message), "A %s table cannot refer to itself",
                                 options->type);
             my_message(ER_UNKNOWN_ERROR, g->Message, MYF(0));
             DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
             } // endif tab
 
         } else {
-          strcpy(g->Message, "Missing object table name or definition");
+          snprintf(g->Message, sizeof(g->Message), "Missing object table name or definition");
           my_message(ER_UNKNOWN_ERROR, g->Message, MYF(0));
           DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
         } // endif tabname
@@ -6647,14 +6646,14 @@ int ha_connect::create(const char *name, TABLE *table_arg,
 
 #if !defined(DOMDOC_SUPPORT)
     if (dom) {
-      strcpy(g->Message, "MS-DOM not supported by this version");
+      snprintf(g->Message, sizeof(g->Message), "MS-DOM not supported by this version");
       xsup= NULL;
       } // endif DomDoc
 #endif   // !DOMDOC_SUPPORT
 
 #if !defined(LIBXML2_SUPPORT)
     if (!dom) {
-      strcpy(g->Message, "libxml2 not supported by this version");
+      snprintf(g->Message, sizeof(g->Message), "libxml2 not supported by this version");
       xsup= NULL;
       } // endif Libxml2
 #endif   // !LIBXML2_SUPPORT
@@ -6671,7 +6670,7 @@ int ha_connect::create(const char *name, TABLE *table_arg,
     int pretty= atoi(GetListOption(g, "Pretty", options->oplist, "2"));
 
     if (!options->lrecl && pretty != 2) {
-      sprintf(g->Message, "LRECL must be specified for pretty=%d", pretty);
+      snprintf(g->Message, sizeof(g->Message), "LRECL must be specified for pretty=%d", pretty);
       my_message(ER_UNKNOWN_ERROR, g->Message, MYF(0));
       rc= HA_ERR_INTERNAL_ERROR;
       DBUG_RETURN(rc);
@@ -6683,7 +6682,7 @@ int ha_connect::create(const char *name, TABLE *table_arg,
 		const char *sep= options->separator;
 
 		if (sep && strlen(sep) > 1) {
-			sprintf(g->Message, "Invalid separator %s", sep);
+			snprintf(g->Message, sizeof(g->Message), "Invalid separator %s", sep);
 			my_message(ER_UNKNOWN_ERROR, g->Message, MYF(0));
 			rc= HA_ERR_INTERNAL_ERROR;
 			DBUG_RETURN(rc);
@@ -6699,14 +6698,14 @@ int ha_connect::create(const char *name, TABLE *table_arg,
       continue;            // This is a virtual column
 
     if (fp->flags & AUTO_INCREMENT_FLAG) {
-      strcpy(g->Message, "Auto_increment is not supported yet");
+      snprintf(g->Message, sizeof(g->Message), "Auto_increment is not supported yet");
       my_message(ER_UNKNOWN_ERROR, g->Message, MYF(0));
       rc= HA_ERR_INTERNAL_ERROR;
       DBUG_RETURN(rc);
       } // endif flags
 
     if (fp->flags & (BLOB_FLAG | ENUM_FLAG | SET_FLAG)) {
-      sprintf(g->Message, "Unsupported type for column %s",
+      snprintf(g->Message, sizeof(g->Message), "Unsupported type for column %s",
                           fp->field_name.str);
       my_message(ER_UNKNOWN_ERROR, g->Message, MYF(0));
       rc= HA_ERR_INTERNAL_ERROR;
@@ -6715,7 +6714,7 @@ int ha_connect::create(const char *name, TABLE *table_arg,
 
     if (type == TAB_VIR)
       if (!fp->option_struct || !fp->option_struct->special) {
-        strcpy(g->Message, "Virtual tables accept only special or virtual columns");
+        snprintf(g->Message, sizeof(g->Message), "Virtual tables accept only special or virtual columns");
         my_message(ER_UNKNOWN_ERROR, g->Message, MYF(0));
         rc= HA_ERR_INTERNAL_ERROR;
         DBUG_RETURN(rc);
@@ -6743,7 +6742,7 @@ int ha_connect::create(const char *name, TABLE *table_arg,
       case MYSQL_TYPE_STRING:
 #if 0
         if (!fp->field_length) {
-          sprintf(g->Message, "Unsupported 0 length for column %s",
+          snprintf(g->Message, sizeof(g->Message), "Unsupported 0 length for column %s",
                               fp->field_name.str);
           rc= HA_ERR_INTERNAL_ERROR;
           my_printf_error(ER_UNKNOWN_ERROR,
@@ -6764,7 +6763,7 @@ int ha_connect::create(const char *name, TABLE *table_arg,
       case MYSQL_TYPE_GEOMETRY:
       default:
 //      fprintf(stderr, "Unsupported type column %s\n", fp->field_name.str);
-        sprintf(g->Message, "Unsupported type for column %s",
+        snprintf(g->Message, sizeof(g->Message), "Unsupported type for column %s",
                             fp->field_name.str);
         rc= HA_ERR_INTERNAL_ERROR;
         my_printf_error(ER_UNKNOWN_ERROR, "Unsupported type for column %s",
@@ -6784,10 +6783,10 @@ int ha_connect::create(const char *name, TABLE *table_arg,
       bool b= false;
 
       if ((b= fp->field_name.length > 10))
-        sprintf(g->Message, "DBF: Column name '%s' is too long (max=10)",
+        snprintf(g->Message, sizeof(g->Message), "DBF: Column name '%s' is too long (max=10)",
                             fp->field_name.str);
       else if ((b= fp->field_length > 255))
-        sprintf(g->Message, "DBF: Column length too big for '%s' (max=255)",
+        snprintf(g->Message, sizeof(g->Message), "DBF: Column length too big for '%s' (max=255)",
                             fp->field_name.str);
 
       if (b) {
@@ -6850,7 +6849,7 @@ int ha_connect::create(const char *name, TABLE *table_arg,
       *p= 0;
     } else {
       strcat(strcat(strcpy(buf, GetTableName()), "."), lwt);
-      sprintf(g->Message, "No file name. Table will use %s", buf);
+      snprintf(g->Message, sizeof(g->Message), "No file name. Table will use %s", buf);
   
       if (sqlcom == SQLCOM_CREATE_TABLE)
         push_warning(thd, Sql_condition::WARN_LEVEL_WARN, ER_UNKNOWN_ERROR, g->Message);
@@ -6862,9 +6861,9 @@ int ha_connect::create(const char *name, TABLE *table_arg,
 
     if ((h= ::open(fn, O_CREAT | O_EXCL, 0666)) == -1) {
       if (errno == EEXIST)
-        sprintf(g->Message, "Default file %s already exists", fn);
+        snprintf(g->Message, sizeof(g->Message), "Default file %s already exists", fn);
       else
-        sprintf(g->Message, "Error %d creating file %s", errno, fn);
+        snprintf(g->Message, sizeof(g->Message), "Error %d creating file %s", errno, fn);
 
       push_warning(thd, Sql_condition::WARN_LEVEL_WARN, ER_UNKNOWN_ERROR, g->Message);
     } else
@@ -6927,13 +6926,13 @@ int ha_connect::create(const char *name, TABLE *table_arg,
     if (g->Alchecked == 0 &&
         (!IsFileType(type) || FileExists(options->filename, false))) {
       if (part_info) {
-        sprintf(g->Message, "Data repartition in %s is unchecked", partname); 
+        snprintf(g->Message, sizeof(g->Message), "Data repartition in %s is unchecked", partname);
         push_warning(thd, Sql_condition::WARN_LEVEL_WARN, ER_UNKNOWN_ERROR, g->Message);
       } else if (sqlcom == SQLCOM_ALTER_TABLE) {
         // This is an ALTER to CONNECT from another engine.
         // It cannot be accepted because the table data would be modified
         // except when the target file does not exist.
-        strcpy(g->Message, "Operation denied. Table data would be modified.");
+        snprintf(g->Message, sizeof(g->Message), "Operation denied. Table data would be modified.");
         my_message(ER_UNKNOWN_ERROR, g->Message, MYF(0));
         DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
       } // endif part_info
@@ -6943,11 +6942,11 @@ int ha_connect::create(const char *name, TABLE *table_arg,
     // Get the index definitions
     if ((xdp= GetIndexInfo()) || sqlcom == SQLCOM_DROP_INDEX) {
       if (options->multiple) {
-        strcpy(g->Message, "Multiple tables are not indexable");
+        snprintf(g->Message, sizeof(g->Message), "Multiple tables are not indexable");
         my_message(ER_UNKNOWN_ERROR, g->Message, MYF(0));
         rc= HA_ERR_UNSUPPORTED;
       } else if (options->compressed) {
-        strcpy(g->Message, "Compressed tables are not indexable");
+        snprintf(g->Message, sizeof(g->Message), "Compressed tables are not indexable");
         my_message(ER_UNKNOWN_ERROR, g->Message, MYF(0));
         rc= HA_ERR_UNSUPPORTED;
       } else if (xdp->Invalid) {
@@ -6982,7 +6981,7 @@ int ha_connect::create(const char *name, TABLE *table_arg,
           } // endif Check
 
       } else if (!GetIndexType(type)) {
-        sprintf(g->Message, "Table type %s is not indexable", options->type);
+        snprintf(g->Message, sizeof(g->Message), "Table type %s is not indexable", options->type);
         my_message(ER_UNKNOWN_ERROR, g->Message, MYF(0));
         rc= HA_ERR_UNSUPPORTED;
       } // endif index type
@@ -7015,8 +7014,8 @@ bool ha_connect::FileExists(const char *fn, bool bf)
 
   if (table) {
     const char *s;
-		char  tfn[_MAX_PATH], filename[_MAX_PATH], path[_MAX_PATH];
-		bool  b= false;
+    char  tfn[_MAX_PATH], filename[_MAX_PATH], path[_MAX_PATH];
+    bool  b= false;
     int   n;
     struct stat info;
 
@@ -7026,7 +7025,7 @@ bool ha_connect::FileExists(const char *fn, bool bf)
     s= "/";
 #endif  // !_WIN32
     if (IsPartitioned()) {
-      sprintf(tfn, fn, GetPartName());
+      snprintf(tfn, sizeof(tfn), fn, GetPartName());
 
       // This is to avoid an initialization error raised by the
       // test on check_table_flags made in ha_partition::open
@@ -7043,7 +7042,7 @@ bool ha_connect::FileExists(const char *fn, bool bf)
       if (errno != ENOENT) {
         char buf[_MAX_PATH + 20];
 
-        sprintf(buf, "Error %d for file %s", errno, filename);
+        snprintf(buf, sizeof(buf),  "Error %d for file %s", errno, filename);
         push_warning(table->in_use, Sql_condition::WARN_LEVEL_WARN, ER_UNKNOWN_ERROR, buf);
         return true;
       } else
@@ -7232,11 +7231,11 @@ ha_connect::check_if_supported_inplace_alter(TABLE *altered_table,
       !SameString(altered_table, "optname") ||
       !SameBool(altered_table, "sepindex")) {
     if (newopt->multiple) {
-      strcpy(g->Message, "Multiple tables are not indexable");
+      snprintf(g->Message, sizeof(g->Message), "Multiple tables are not indexable");
       my_message(ER_UNKNOWN_ERROR, g->Message, MYF(0));
       DBUG_RETURN(HA_ALTER_ERROR);
     } else if (newopt->compressed) {
-      strcpy(g->Message, "Compressed tables are not indexable");
+      snprintf(g->Message, sizeof(g->Message), "Compressed tables are not indexable");
       my_message(ER_UNKNOWN_ERROR, g->Message, MYF(0));
       DBUG_RETURN(HA_ALTER_ERROR);
     } else if (GetIndexType(type) == 1) {
@@ -7271,7 +7270,7 @@ ha_connect::check_if_supported_inplace_alter(TABLE *altered_table,
         } // endif Check
 
     } else if (!GetIndexType(type)) {
-      sprintf(g->Message, "Table type %s is not indexable", oldopt->type);
+      snprintf(g->Message, sizeof(g->Message), "Table type %s is not indexable", oldopt->type);
       my_message(ER_UNKNOWN_ERROR, g->Message, MYF(0));
       DBUG_RETURN(HA_ALTER_ERROR);
     } // endif index type
@@ -7287,7 +7286,7 @@ ha_connect::check_if_supported_inplace_alter(TABLE *altered_table,
       tshp= NULL;
 
       if (FileExists(fn, false)) {
-        strcpy(g->Message, "Operation denied. Table data would be lost.");
+        snprintf(g->Message, sizeof(g->Message), "Operation denied. Table data would be lost.");
         my_message(ER_UNKNOWN_ERROR, g->Message, MYF(0));
         DBUG_RETURN(HA_ALTER_ERROR);
       } else

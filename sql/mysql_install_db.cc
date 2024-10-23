@@ -313,7 +313,7 @@ static char *get_plugindir()
 {
   static char plugin_dir[2*MAX_PATH];
   get_basedir(plugin_dir, sizeof(plugin_dir), mysqld_path, '/');
-  strcat(plugin_dir, "/" STR(INSTALL_PLUGINDIR));
+  safe_strcat(plugin_dir, sizeof(plugin_dir), "/" STR(INSTALL_PLUGINDIR));
 
   if (access(plugin_dir, 0) == 0)
     return plugin_dir;
@@ -335,7 +335,7 @@ static char *init_bootstrap_command_line(char *cmdline, size_t size)
     " %s"
     " --bootstrap"
     " --datadir=."
-    " --loose-innodb-buffer-pool-size=10M"
+    " --loose-innodb-buffer-pool-size=20M"
     "\""
     , mysqld_path, opt_verbose_bootstrap ? "--console" : "");
   return cmdline;

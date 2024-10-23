@@ -24,18 +24,13 @@ Purge old versions
 Created 3/26/1996 Heikki Tuuri
 *******************************************************/
 
-#ifndef trx0purge_h
-#define trx0purge_h
+#pragma once
 
 #include "trx0sys.h"
 #include "que0types.h"
 #include "srw_lock.h"
 
 #include <queue>
-
-/** A dummy undo record used as a return value when we have a whole undo log
-which needs no purge */
-extern trx_undo_rec_t	trx_purge_dummy_rec;
 
 /** Prepend the history list with an undo log.
 Remove the undo log segment from the rseg slot if it is too big for reuse.
@@ -44,12 +39,20 @@ Remove the undo log segment from the rseg slot if it is too big for reuse.
 @param[in,out]	mtr		mini-transaction */
 void
 trx_purge_add_undo_to_history(const trx_t* trx, trx_undo_t*& undo, mtr_t* mtr);
+
+/**
+Remove unnecessary history data from rollback segments. NOTE that when this
+function is called, the caller (purge_coordinator_callback)
+must not have any latches on undo log pages!
+*/
+void trx_purge_truncate_history();
+
 /**
 Run a purge batch.
-@param n_tasks   number of purge tasks to submit to the queue
-@param truncate  whether to truncate the history at the end of the batch
+@param n_tasks       number of purge tasks to submit to the queue
+@param history_size  trx_sys.history_size()
 @return number of undo log pages handled in the batch */
-ulint trx_purge(ulint n_tasks, bool truncate);
+ulint trx_purge(ulint n_tasks, ulint history_size);
 
 /** Rollback segements from a given transaction with trx-no
 scheduled for purge. */
@@ -61,7 +64,7 @@ public:
 	typedef trx_rsegs_t::iterator iterator;
 	typedef trx_rsegs_t::const_iterator const_iterator;
 
-	TrxUndoRsegs() {}
+	TrxUndoRsegs() = default;
 
 	/** Constructor */
 	TrxUndoRsegs(trx_rseg_t& rseg)
@@ -125,9 +128,10 @@ class purge_sys_t
 {
 public:
   /** latch protecting view, m_enabled */
-  MY_ALIGNED(CACHE_LINE_SIZE) mutable srw_spin_lock latch;
+  alignas(CPU_LEVEL1_DCACHE_LINESIZE) mutable srw_spin_lock latch;
 private:
-  /** The purge will not remove undo logs which are >= this view */
+  /** Read view at the start of a purge batch. Any encountered index records
+  that are older than view will be removed. */
   ReadViewBase view;
   /** whether purge is enabled; protected by latch and std::atomic */
   std::atomic<bool> m_enabled;
@@ -137,6 +141,12 @@ private:
   Atomic_counter<uint32_t> m_SYS_paused;
   /** number of stop_FTS() calls without resume_FTS() */
   Atomic_counter<uint32_t> m_FTS_paused;
+
+  /** latch protecting end_view */
+  alignas(CPU_LEVEL1_DCACHE_LINESIZE) srw_spin_lock_low end_latch;
+  /** Read view at the end of a purge batch (copied from view). Any undo pages
+  containing records older than end_view may be freed. */
+  ReadViewBase end_view;
 public:
 	que_t*		query;		/*!< The query graph which will do the
 					parallelized purge operation */
@@ -265,24 +275,67 @@ public:
   /** check stop_SYS() */
   void check_stop_FTS() { if (must_wait_FTS()) wait_FTS(); }
 
-  /** A wrapper around ReadView::changes_visible(). */
-  bool changes_visible(trx_id_t id, const table_name_t &name) const
-  {
-    return view.changes_visible(id, name);
-  }
+  /** Determine if the history of a transaction is purgeable.
+  @param trx_id  transaction identifier
+  @return whether the history is purgeable */
+  TRANSACTIONAL_TARGET bool is_purgeable(trx_id_t trx_id) const;
+
   /** A wrapper around ReadView::low_limit_no(). */
   trx_id_t low_limit_no() const
   {
-    /* MDEV-22718 FIXME: We are not holding latch here! */
+    /* This function may only be called by purge_coordinator_callback().
+
+    The purge coordinator task may call this without holding any latch,
+    because it is the only thread that may modify purge_sys.view.
+
+    Any other threads that access purge_sys.view must hold purge_sys.latch,
+    typically via purge_sys_t::view_guard. */
     return view.low_limit_no();
   }
+  /** A wrapper around ReadView::sees(). */
+  trx_id_t sees(trx_id_t id) const
+  {
+    /* This function may only be called by purge_coordinator_callback().
+
+    The purge coordinator task may call this without holding any latch,
+    because it is the only thread that may modify purge_sys.view.
+
+    Any other threads that access purge_sys.view must hold purge_sys.latch,
+    typically via purge_sys_t::view_guard. */
+    return view.sees(id);
+  }
   /** A wrapper around trx_sys_t::clone_oldest_view(). */
+  template<bool also_end_view= false>
   void clone_oldest_view()
   {
     latch.wr_lock(SRW_LOCK_CALL);
     trx_sys.clone_oldest_view(&view);
+    if (also_end_view)
+      (end_view= view).
+        clamp_low_limit_id(head.trx_no ? head.trx_no : tail.trx_no);
     latch.wr_unlock();
   }
+
+  /** Update end_view at the end of a purge batch. */
+  inline void clone_end_view();
+
+  struct view_guard
+  {
+    inline view_guard();
+    inline ~view_guard();
+
+    /** @return purge_sys.view */
+    inline const ReadViewBase &view() const;
+  };
+
+  struct end_view_guard
+  {
+    inline end_view_guard();
+    inline ~end_view_guard();
+
+    /** @return purge_sys.end_view */
+    inline const ReadViewBase &view() const;
+  };
 
   /** Stop the purge thread and check n_ref_count of all auxiliary
   and common table associated with the fts table.
@@ -295,4 +348,20 @@ public:
 /** The global data structure coordinating a purge */
 extern purge_sys_t	purge_sys;
 
-#endif /* trx0purge_h */
+purge_sys_t::view_guard::view_guard()
+{ purge_sys.latch.rd_lock(SRW_LOCK_CALL); }
+
+purge_sys_t::view_guard::~view_guard()
+{ purge_sys.latch.rd_unlock(); }
+
+const ReadViewBase &purge_sys_t::view_guard::view() const
+{ return purge_sys.view; }
+
+purge_sys_t::end_view_guard::end_view_guard()
+{ purge_sys.end_latch.rd_lock(); }
+
+purge_sys_t::end_view_guard::~end_view_guard()
+{ purge_sys.end_latch.rd_unlock(); }
+
+const ReadViewBase &purge_sys_t::end_view_guard::view() const
+{ return purge_sys.end_view; }

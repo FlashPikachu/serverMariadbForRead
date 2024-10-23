@@ -1,6 +1,6 @@
 /*
    Copyright (c) 2000, 2017, Oracle and/or its affiliates.
-   Copyright (c) 2008, 2021, MariaDB
+   Copyright (c) 2008, 2022, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -964,6 +964,51 @@ Type_handler::aggregate_for_result_traditional(const Type_handler *a,
 }
 
 
+bool Field::check_assignability_from(const Type_handler *from,
+                                     bool ignore) const
+{
+  /*
+    Using type_handler_for_item_field() here to get the data type handler
+    on both sides. This is needed to make sure aggregation for Field
+    works the same way with how Item_field aggregates for UNION or CASE,
+    so these statements:
+      SELECT a FROM t1 UNION SELECT b FROM t1; // Item_field vs Item_field
+      UPDATE t1 SET a=b;                       // Field      vs Item_field
+    either both return "Illegal parameter data types" or both pass
+    the data type compatibility test.
+    For MariaDB standard data types, using type_handler_for_item_field()
+    turns ENUM/SET into just CHAR.
+  */
+  Type_handler_hybrid_field_type th(type_handler()->
+                                      type_handler_for_item_field());
+  if (th.aggregate_for_result(from->type_handler_for_item_field()))
+  {
+    bool error= (!ignore && get_thd()->is_strict_mode()) ||
+                (type_handler()->is_scalar_type() != from->is_scalar_type());
+    /*
+      Display fully qualified column name for table columns.
+      Display non-qualified names for other things,
+      e.g. SP variables, SP return values, SP and CURSOR parameters.
+    */
+    if (table->s->db.str && table->s->table_name.str)
+      my_printf_error(ER_ILLEGAL_PARAMETER_DATA_TYPES2_FOR_OPERATION,
+                      "Cannot cast '%s' as '%s' in assignment of %`s.%`s.%`s",
+                      MYF(error ? 0 : ME_WARNING),
+                      from->name().ptr(), type_handler()->name().ptr(),
+                      table->s->db.str, table->s->table_name.str,
+                      field_name.str);
+    else
+      my_printf_error(ER_ILLEGAL_PARAMETER_DATA_TYPES2_FOR_OPERATION,
+                      "Cannot cast '%s' as '%s' in assignment of %`s",
+                      MYF(error ? 0 : ME_WARNING),
+                      from->name().ptr(), type_handler()->name().ptr(),
+                      field_name.str);
+    return error;
+  }
+  return false;
+}
+
+
 /*
   Test if the given string contains important data:
   not spaces for character string,
@@ -1445,17 +1490,8 @@ bool Field::sp_prepare_and_store_item(THD *thd, Item **value)
 
   Item *expr_item;
 
-  if (!(expr_item= thd->sp_prepare_func_item(value, 1)))
+  if (!(expr_item= thd->sp_fix_func_item_for_assignment(this, value)))
     goto error;
-
-  /*
-    expr_item is now fixed, it's safe to call cmp_type()
-  */
-  if (expr_item->cmp_type() == ROW_RESULT)
-  {
-    my_error(ER_OPERAND_COLUMNS, MYF(0), 1);
-    goto error;
-  }
 
   /* Save the value in the field. Convert the value if needed. */
 
@@ -1888,17 +1924,11 @@ Field::Field(uchar *ptr_arg,uint32 length_arg,uchar *null_ptr_arg,
 }
 
 
-void Field::hash(ulong *nr, ulong *nr2)
+void Field::hash_not_null(Hasher *hasher)
 {
-  if (is_null())
-  {
-    *nr^= (*nr << 1) | 1;
-  }
-  else
-  {
-    uint len= pack_length();
-    sort_charset()->hash_sort(ptr, len, nr, nr2);
-  }
+  DBUG_ASSERT(marked_for_read());
+  DBUG_ASSERT(!is_null());
+  hasher->add(sort_charset(), ptr, pack_length());
 }
 
 size_t
@@ -2527,6 +2557,7 @@ Field *Field::make_new_field(MEM_ROOT *root, TABLE *new_table,
   tmp->key_start.init(0);
   tmp->part_of_key.init(0);
   tmp->part_of_sortkey.init(0);
+  tmp->read_stats= NULL;
   /*
     TODO: it is not clear why this method needs to reset unireg_check.
     Try not to reset it, or explain why it needs to be reset.
@@ -2620,6 +2651,11 @@ int Field::set_default()
   if (default_value)
   {
     Query_arena backup_arena;
+    /*
+      TODO: this may impose memory leak until table flush.
+          See comment in
+          TABLE::update_virtual_fields(handler *, enum_vcol_update_mode).
+    */
     table->in_use->set_n_backup_active_arena(table->expr_arena, &backup_arena);
     int rc= default_value->expr->save_in_field(this, 0);
     table->in_use->restore_active_arena(table->expr_arena, &backup_arena);
@@ -2685,6 +2721,8 @@ bool Field_row::sp_prepare_and_store_item(THD *thd, Item **value)
       fixed underlying Item_field pointing to Field_row.
     - In case if we're assigning from a ROW() value, src and value[0] will
       point to the same Item_row.
+    - In case if we're assigning from a subselect, src and value[0] also
+      point to the same Item_singlerow_subselect.
   */
   Item *src;
   if (!(src= thd->sp_fix_func_item(value)) ||
@@ -2696,6 +2734,7 @@ bool Field_row::sp_prepare_and_store_item(THD *thd, Item **value)
     DBUG_RETURN(true);
   }
 
+  src->bring_value();
   DBUG_RETURN(m_table->sp_set_all_fields_from_item(thd, src));
 }
 
@@ -3340,11 +3379,12 @@ Field_new_decimal::Field_new_decimal(uchar *ptr_arg,
                                      decimal_digits_t dec_arg,bool zero_arg,
                                      bool unsigned_arg)
   :Field_num(ptr_arg, len_arg, null_ptr_arg, null_bit_arg,
-             unireg_check_arg, field_name_arg, dec_arg, zero_arg, unsigned_arg)
+             unireg_check_arg, field_name_arg,
+             MY_MIN(dec_arg, DECIMAL_MAX_SCALE), zero_arg, unsigned_arg)
 {
   precision= get_decimal_precision(len_arg, dec_arg, unsigned_arg);
-  DBUG_ASSERT((precision <= DECIMAL_MAX_PRECISION) &&
-              (dec <= DECIMAL_MAX_SCALE));
+  DBUG_ASSERT(precision <= DECIMAL_MAX_PRECISION);
+  DBUG_ASSERT(dec <= DECIMAL_MAX_SCALE);
   bin_size= my_decimal_get_binary_size(precision, dec);
 }
 
@@ -3401,7 +3441,7 @@ bool Field_new_decimal::store_value(const my_decimal *decimal_value,
   DBUG_ASSERT(marked_for_write_or_computed());
   int error= 0;
   DBUG_ENTER("Field_new_decimal::store_value");
-#ifndef DBUG_OFF
+#ifdef DBUG_TRACE
   {
     char dbug_buff[DECIMAL_MAX_STR_LENGTH+2];
     DBUG_PRINT("enter", ("value: %s", dbug_decimal_as_string(dbug_buff, decimal_value)));
@@ -3416,7 +3456,7 @@ bool Field_new_decimal::store_value(const my_decimal *decimal_value,
     error= 1;
     decimal_value= &decimal_zero;
   }
-#ifndef DBUG_OFF
+#ifdef DBUG_TRACE
   {
     char dbug_buff[DECIMAL_MAX_STR_LENGTH+2];
     DBUG_PRINT("info", ("saving with precision %d  scale: %d  value %s",
@@ -3508,7 +3548,7 @@ int Field_new_decimal::store(const char *from, size_t length,
     }
   }
 
-#ifndef DBUG_OFF
+#ifdef DBUG_TRACE
   char dbug_buff[DECIMAL_MAX_STR_LENGTH+2];
   DBUG_PRINT("enter", ("value: %s",
                        dbug_decimal_as_string(dbug_buff, &decimal_value)));
@@ -7541,7 +7581,7 @@ my_decimal *Field_string::val_decimal(my_decimal *decimal_value)
   THD *thd= get_thd();
   Converter_str2my_decimal_with_warn(thd,
                                      Warn_filter_string(thd, this),
-                                     E_DEC_FATAL_ERROR,
+                                     E_DEC_FATAL_ERROR & ~E_DEC_BAD_NUM,
                                      Field_string::charset(),
                                      (const char *) ptr,
                                      field_length, decimal_value);
@@ -7588,7 +7628,8 @@ int Field_string::cmp(const uchar *a_ptr, const uchar *b_ptr) const
   return field_charset()->coll->strnncollsp_nchars(field_charset(),
                                                    a_ptr, field_length,
                                                    b_ptr, field_length,
-                                                   Field_string::char_length());
+                                                   Field_string::char_length(),
+                        MY_STRNNCOLLSP_NCHARS_EMULATE_TRIMMED_TRAILING_SPACES);
 }
 
 
@@ -7902,7 +7943,7 @@ my_decimal *Field_varstring::val_decimal(my_decimal *decimal_value)
   DBUG_ASSERT(marked_for_read());
   THD *thd= get_thd();
   Converter_str2my_decimal_with_warn(thd, Warn_filter(thd),
-                                     E_DEC_FATAL_ERROR,
+                                     E_DEC_FATAL_ERROR & ~E_DEC_BAD_NUM,
                                      Field_varstring::charset(),
                                      (const char *) get_data(),
                                      get_length(), decimal_value);
@@ -7968,10 +8009,11 @@ int Field_varstring::cmp(const uchar *a_ptr, const uchar *b_ptr) const
 
 
 int Field_varstring::cmp_prefix(const uchar *a_ptr, const uchar *b_ptr,
-                                size_t prefix_len) const
+                                size_t prefix_char_len) const
 {
-  /* avoid expensive well_formed_char_length if possible */
-  if (prefix_len == table->field[field_index]->field_length)
+  /* avoid more expensive strnncollsp_nchars() if possible */
+  if (prefix_char_len * field_charset()->mbmaxlen ==
+      table->field[field_index]->field_length)
     return Field_varstring::cmp(a_ptr, b_ptr);
 
   size_t a_length, b_length;
@@ -7991,8 +8033,8 @@ int Field_varstring::cmp_prefix(const uchar *a_ptr, const uchar *b_ptr,
                                                    a_length,
                                                    b_ptr + length_bytes,
                                                    b_length,
-                                                   prefix_len /
-                                                     field_charset()->mbmaxlen);
+                                                   prefix_char_len,
+                                                   0);
 }
 
 
@@ -8305,17 +8347,12 @@ bool Field_varstring::is_equal(const Column_definition &new_field) const
 }
 
 
-void Field_varstring::hash(ulong *nr, ulong *nr2)
+void Field_varstring::hash_not_null(Hasher *hasher)
 {
-  if (is_null())
-  {
-    *nr^= (*nr << 1) | 1;
-  }
-  else
-  {
-    uint len=  length_bytes == 1 ? (uint) *ptr : uint2korr(ptr);
-    charset()->hash_sort(ptr + length_bytes, len, nr, nr2);
-  }
+  DBUG_ASSERT(marked_for_read());
+  DBUG_ASSERT(!is_null());
+  uint len=  length_bytes == 1 ? (uint) *ptr : uint2korr(ptr);
+  hasher->add(charset(), ptr + length_bytes, len);
 }
 
 
@@ -8690,6 +8727,17 @@ oom_error:
 }
 
 
+void Field_blob::hash_not_null(Hasher *hasher)
+{
+  DBUG_ASSERT(marked_for_read());
+  DBUG_ASSERT(!is_null());
+  char *blob;
+  memcpy(&blob, ptr + packlength, sizeof(char*));
+  if (blob)
+    hasher->add(Field_blob::charset(), blob, get_length(ptr));
+}
+
+
 double Field_blob::val_real(void)
 {
   DBUG_ASSERT(marked_for_read());
@@ -8748,7 +8796,7 @@ my_decimal *Field_blob::val_decimal(my_decimal *decimal_value)
 
   THD *thd= get_thd();
   Converter_str2my_decimal_with_warn(thd, Warn_filter(thd),
-                                     E_DEC_FATAL_ERROR,
+                                     E_DEC_FATAL_ERROR & ~E_DEC_BAD_NUM,
                                      Field_blob::charset(),
                                      blob, length, decimal_value);
   return decimal_value;
@@ -8773,7 +8821,7 @@ int Field_blob::cmp(const uchar *a_ptr, const uchar *b_ptr) const
 
 
 int Field_blob::cmp_prefix(const uchar *a_ptr, const uchar *b_ptr,
-                           size_t prefix_len) const
+                           size_t prefix_char_len) const
 {
   uchar *blob1,*blob2;
   memcpy(&blob1, a_ptr+packlength, sizeof(char*));
@@ -8782,8 +8830,8 @@ int Field_blob::cmp_prefix(const uchar *a_ptr, const uchar *b_ptr,
   return field_charset()->coll->strnncollsp_nchars(field_charset(),
                                                    blob1, a_len,
                                                    blob2, b_len,
-                                                   prefix_len /
-                                                   field_charset()->mbmaxlen);
+                                                   prefix_char_len,
+                                                   0);
 }
 
 
@@ -9752,20 +9800,27 @@ const DTCollation & Field_bit::dtcollation() const
 }
 
 
-void Field_bit::hash(ulong *nr, ulong *nr2)
+/*
+  This method always calculates hash over 8 bytes.
+  This is different from how the HEAP engine calculate hash:
+  HEAP takes into account the actual octet size, so say for BIT(18)
+  it calculates hash over three bytes only:
+  - the incomplete byte with bits 16..17
+  - the two full bytes with bits 0..15
+  See hp_rec_hashnr(), hp_hashnr() for details.
+
+  The HEAP way is more efficient, especially for short lengths.
+  Let's consider fixing Field_bit eventually to do it in the HEAP way,
+  with proper measures to upgrade partitioned tables easy.
+*/
+void Field_bit::hash_not_null(Hasher *hasher)
 {
-  if (is_null())
-  {
-    *nr^= (*nr << 1) | 1;
-  }
-  else
-  {
-    CHARSET_INFO *cs= &my_charset_bin;
-    longlong value= Field_bit::val_int();
-    uchar tmp[8];
-    mi_int8store(tmp,value);
-    cs->hash_sort(tmp, 8, nr, nr2);
-  }
+  DBUG_ASSERT(marked_for_read());
+  DBUG_ASSERT(!is_null());
+  longlong value= Field_bit::val_int();
+  uchar tmp[8];
+  mi_int8store(tmp,value);
+  hasher->add(&my_charset_bin, tmp, 8);
 }
 
 
@@ -9961,7 +10016,7 @@ my_decimal *Field_bit::val_decimal(my_decimal *deciaml_value)
     (not the table->record[0] necessarily)
 */
 int Field_bit::cmp_prefix(const uchar *a, const uchar *b,
-                          size_t prefix_len) const
+                          size_t prefix_char_len) const
 {
   my_ptrdiff_t a_diff= a - ptr;
   my_ptrdiff_t b_diff= b - ptr;
@@ -9979,7 +10034,7 @@ int Field_bit::cmp_prefix(const uchar *a, const uchar *b,
 }
 
 
-int Field_bit::key_cmp(const uchar *str, uint length) const
+int Field_bit::key_cmp(const uchar *str, uint) const
 {
   if (bit_len)
   {
@@ -9988,7 +10043,6 @@ int Field_bit::key_cmp(const uchar *str, uint length) const
     if ((flag= (int) (bits - *str)))
       return flag;
     str++;
-    length--;
   }
   return memcmp(ptr, str, bytes_in_rec);
 }
@@ -10478,8 +10532,8 @@ bool check_expression(Virtual_column_info *vcol, const LEX_CSTRING *name,
   uint filter= VCOL_IMPOSSIBLE;
   if (type != VCOL_GENERATED_VIRTUAL && type != VCOL_DEFAULT)
     filter|= VCOL_NOT_STRICTLY_DETERMINISTIC;
-  if (type == VCOL_GENERATED_VIRTUAL)
-    filter|= VCOL_NOT_VIRTUAL;
+  if (type != VCOL_DEFAULT)
+    filter|= VCOL_NEXTVAL;
 
   if (unlikely(ret || (res.errors & filter)))
   {
@@ -10688,7 +10742,7 @@ bool Column_definition::check(THD *thd)
       TIMESTAMP columns get implicit DEFAULT value when
       explicit_defaults_for_timestamp is not set.
     */
-    if ((opt_explicit_defaults_for_timestamp ||
+    if (((thd->variables.option_bits & OPTION_EXPLICIT_DEF_TIMESTAMP) ||
         !is_timestamp_type()) && !vers_sys_field())
     {
       flags|= NO_DEFAULT_VALUE_FLAG;
@@ -10815,6 +10869,7 @@ Column_definition::Column_definition(THD *thd, Field *old_field,
                                                Field *orig_field)
  :Column_definition_attributes(old_field)
 {
+  srid= 0;
   on_update=  NULL;
   field_name= old_field->field_name;
   flags=      old_field->flags;
@@ -10823,6 +10878,7 @@ Column_definition::Column_definition(THD *thd, Field *old_field,
   comment=    old_field->comment;
   vcol_info=  old_field->vcol_info;
   option_list= old_field->option_list;
+  explicitly_nullable= !(old_field->flags & NOT_NULL_FLAG);
   compression_method_ptr= 0;
   versioning= VERSIONING_NOT_SET;
   invisible= old_field->invisible;
@@ -10846,8 +10902,6 @@ Column_definition::Column_definition(THD *thd, Field *old_field,
   }
 
   type_handler()->Column_definition_reuse_fix_attributes(thd, this, old_field);
-
-  type_handler()->Column_definition_implicit_upgrade(this);
 
   /*
     Copy the default (constant/function) from the column object orig_field, if
@@ -10978,7 +11032,7 @@ Create_field *Create_field::clone(MEM_ROOT *mem_root) const
 }
 
 /**
-   Return true if default is an expression that must be saved explicitely
+   Return true if default is an expression that must be saved explicitly
 
    This is:
      - Not basic constants

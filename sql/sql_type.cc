@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2015, 2021, MariaDB
+   Copyright (c) 2015, 2022, MariaDB
 
  This program is free software; you can redistribute it and/or modify
  it under the terms of the GNU General Public License as published by
@@ -94,10 +94,6 @@ Vers_type_trx             vers_type_trx;
 class Type_collection_std: public Type_collection
 {
 public:
-  const Type_handler *handler_by_name(const LEX_CSTRING &name) const override
-  {
-    return NULL;
-  }
   const Type_handler *aggregate_for_result(const Type_handler *a,
                                            const Type_handler *b)
                                            const override
@@ -136,10 +132,6 @@ public:
   bool init(Type_handler_data *data) override
   {
     return false;
-  }
-  const Type_handler *handler_by_name(const LEX_CSTRING &name) const override
-  {
-    return NULL;
   }
   const Type_handler *aggregate_for_result(const Type_handler *a,
                                            const Type_handler *b)
@@ -212,7 +204,7 @@ Type_handler::handler_by_name(THD *thd, const LEX_CSTRING &name)
   }
 
 #ifdef HAVE_SPATIAL
-  const Type_handler *ha= type_collection_geometry.handler_by_name(name);
+  const Type_handler *ha= Type_collection_geometry_handler_by_name(name);
   if (ha)
     return ha;
 #endif
@@ -1746,7 +1738,7 @@ Type_handler_time_common::type_handler_for_native_format() const
 
 const Type_handler *Type_handler_typelib::type_handler_for_item_field() const
 {
-  return &type_handler_string;
+  return &type_handler_varchar;
 }
 
 
@@ -1959,6 +1951,9 @@ Type_collection_std::aggregate_for_comparison(const Type_handler *ha,
       return ha;
     }
   }
+  if ((a == INT_RESULT && b == STRING_RESULT) ||
+      (b == INT_RESULT && a == STRING_RESULT))
+    return &type_handler_newdecimal;
   if ((a == INT_RESULT || a == DECIMAL_RESULT) &&
       (b == INT_RESULT || b == DECIMAL_RESULT))
     return &type_handler_newdecimal;
@@ -2295,7 +2290,6 @@ Type_handler_decimal_result::make_num_distinct_aggregator_field(
                                                             const Item *item)
                                                             const
 {
-  DBUG_ASSERT(item->decimals <= DECIMAL_MAX_SCALE);
   return new (mem_root)
          Field_new_decimal(NULL, item->max_length,
                            (uchar *) (item->maybe_null() ? "" : 0),
@@ -2716,7 +2710,7 @@ Type_handler::Column_definition_set_attributes(THD *thd,
                                                column_definition_type_t type)
                                                const
 {
-  def->set_lex_charset_collation(attr.lex_charset_collation());
+  def->set_charset_collation_attrs(attr.charset_collation_attrs());
   def->set_length_and_dec(attr);
   return false;
 }
@@ -3006,8 +3000,7 @@ bool Type_handler::
        Column_definition_prepare_stage1(THD *thd,
                                         MEM_ROOT *mem_root,
                                         Column_definition *def,
-                                        handler *file,
-                                        ulonglong table_flags,
+                                        column_definition_type_t type,
                                         const Column_derived_attributes
                                               *derived_attr)
                                         const
@@ -3020,8 +3013,7 @@ bool Type_handler_null::
        Column_definition_prepare_stage1(THD *thd,
                                         MEM_ROOT *mem_root,
                                         Column_definition *def,
-                                        handler *file,
-                                        ulonglong table_flags,
+                                        column_definition_type_t type,
                                         const Column_derived_attributes
                                               *derived_attr)
                                         const
@@ -3035,8 +3027,7 @@ bool Type_handler_row::
        Column_definition_prepare_stage1(THD *thd,
                                         MEM_ROOT *mem_root,
                                         Column_definition *def,
-                                        handler *file,
-                                        ulonglong table_flags,
+                                        column_definition_type_t type,
                                         const Column_derived_attributes
                                               *derived_attr)
                                         const
@@ -3050,8 +3041,7 @@ bool Type_handler_temporal_result::
        Column_definition_prepare_stage1(THD *thd,
                                         MEM_ROOT *mem_root,
                                         Column_definition *def,
-                                        handler *file,
-                                        ulonglong table_flags,
+                                        column_definition_type_t type,
                                         const Column_derived_attributes
                                               *derived_attr)
                                         const
@@ -3065,8 +3055,7 @@ bool Type_handler_numeric::
        Column_definition_prepare_stage1(THD *thd,
                                         MEM_ROOT *mem_root,
                                         Column_definition *def,
-                                        handler *file,
-                                        ulonglong table_flags,
+                                        column_definition_type_t type,
                                         const Column_derived_attributes
                                               *derived_attr)
                                         const
@@ -3079,8 +3068,7 @@ bool Type_handler_newdecimal::
        Column_definition_prepare_stage1(THD *thd,
                                         MEM_ROOT *mem_root,
                                         Column_definition *def,
-                                        handler *file,
-                                        ulonglong table_flags,
+                                        column_definition_type_t type,
                                         const Column_derived_attributes
                                               *derived_attr)
                                         const
@@ -3094,28 +3082,26 @@ bool Type_handler_bit::
        Column_definition_prepare_stage1(THD *thd,
                                         MEM_ROOT *mem_root,
                                         Column_definition *def,
-                                        handler *file,
-                                        ulonglong table_flags,
+                                        column_definition_type_t type,
                                         const Column_derived_attributes
                                               *derived_attr)
                                         const
 {
   def->charset= &my_charset_numeric;
-  return def->prepare_stage1_bit(thd, mem_root, file, table_flags);
+  return def->prepare_stage1_bit(thd, mem_root);
 }
 
 bool Type_handler_typelib::
        Column_definition_prepare_stage1(THD *thd,
                                         MEM_ROOT *mem_root,
                                         Column_definition *def,
-                                        handler *file,
-                                        ulonglong table_flags,
+                                        column_definition_type_t type,
                                         const Column_derived_attributes
                                               *derived_attr)
                                         const
 {
   return def->prepare_charset_for_string(derived_attr) ||
-         def->prepare_stage1_typelib(thd, mem_root, file, table_flags);
+         def->prepare_stage1_typelib(thd, mem_root, type);
 }
 
 
@@ -3123,14 +3109,13 @@ bool Type_handler_string_result::
        Column_definition_prepare_stage1(THD *thd,
                                         MEM_ROOT *mem_root,
                                         Column_definition *def,
-                                        handler *file,
-                                        ulonglong table_flags,
+                                        column_definition_type_t type,
                                         const Column_derived_attributes
                                               *derived_attr)
                                         const
 {
   return def->prepare_charset_for_string(derived_attr) ||
-         def->prepare_stage1_string(thd, mem_root, file, table_flags);
+         def->prepare_stage1_string(thd, mem_root);
 }
 
 
@@ -3341,10 +3326,11 @@ bool Type_handler_bit::
                                         handler *file,
                                         ulonglong table_flags) const
 {
-  /* 
-    We have sql_field->pack_flag already set here, see
-    mysql_prepare_create_table().
-  */
+  if (!(table_flags & HA_CAN_BIT_FIELD))
+  {
+    def->pack_flag|= FIELDFLAG_TREAT_BIT_AS_CHAR;
+    def->create_length_to_internal_length_bit();
+  }
   return false;
 }
 
@@ -4259,18 +4245,6 @@ void Type_handler_temporal_with_date::Item_update_null_value(Item *item) const
   (void) item->get_date(thd, &ltime, Datetime::Options(thd));
 }
 
-bool
-Type_handler_timestamp_common::
-Column_definition_set_attributes(THD *thd,
-                                 Column_definition *def,
-                                 const Lex_field_type_st &attr,
-                                 column_definition_type_t type) const
-{
-  Type_handler::Column_definition_set_attributes(thd, def, attr, type);
-  if (!opt_explicit_defaults_for_timestamp)
-    def->flags|= NOT_NULL_FLAG;
-  return false;
-}
 
 void Type_handler_string_result::Item_update_null_value(Item *item) const
 {
@@ -9053,13 +9027,13 @@ Type_handler_timestamp_common::Item_val_native_with_conversion(THD *thd,
                                                                Item *item,
                                                                Native *to) const
 {
-  MYSQL_TIME ltime;
   if (item->type_handler()->type_handler_for_native_format() ==
       &type_handler_timestamp2)
     return item->val_native(thd, to);
+  Datetime dt(thd, item, Datetime::Options(TIME_NO_ZERO_IN_DATE, thd));
   return
-    item->get_date(thd, &ltime, Datetime::Options(TIME_NO_ZERO_IN_DATE, thd)) ||
-    TIME_to_native(thd, &ltime, to, item->datetime_precision(thd));
+    !dt.is_valid_datetime() ||
+    TIME_to_native(thd, dt.get_mysql_time(), to, item->datetime_precision(thd));
 }
 
 bool Type_handler_null::union_element_finalize(Item_type_holder *item) const

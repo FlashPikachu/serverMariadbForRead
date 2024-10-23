@@ -347,6 +347,9 @@ TODO list:
 #include "probes_mysql.h"
 #include "transaction.h"
 #include "strfunc.h"
+#ifdef WITH_WSREP
+#include "wsrep_mysqld.h"
+#endif
 
 const uchar *query_state_map;
 
@@ -1205,7 +1208,7 @@ void Query_cache::end_of_result(THD *thd)
     BLOCK_LOCK_WR(query_block);
     Query_cache_query *header= query_block->query();
     Query_cache_block *last_result_block;
-    size_t allign_size;
+    size_t align_size;
     size_t len;
 
     if (header->result() == 0)
@@ -1223,8 +1226,8 @@ void Query_cache::end_of_result(THD *thd)
       DBUG_VOID_RETURN;
     }
     last_result_block= header->result()->prev;
-    allign_size= ALIGN_SIZE(last_result_block->used);
-    len= MY_MAX(query_cache.min_allocation_unit, allign_size);
+    align_size= ALIGN_SIZE(last_result_block->used);
+    len= MY_MAX(query_cache.min_allocation_unit, align_size);
     if (last_result_block->length >= query_cache.min_allocation_unit + len)
       query_cache.split_block(last_result_block,len);
 
@@ -2128,8 +2131,7 @@ lookup:
                      ("Handler require invalidation queries of %.*s %llu-%llu",
                       (int)qcache_se_key_len, qcache_se_key_name,
                       engine_data, table->engine_data()));
-          invalidate_table_internal(thd,
-                                    (uchar *) table->db(),
+          invalidate_table_internal((uchar *) table->db(),
                                     table->key_length());
         }
         else
@@ -2378,7 +2380,7 @@ void Query_cache::invalidate(THD *thd, const char *db)
           if (strcmp(table->db(),db) == 0)
           {
             Query_cache_block_table *list_root= table_block->table(0);
-            invalidate_query_block_list(thd,list_root);
+            invalidate_query_block_list(list_root);
           }
 
           table_block= next;
@@ -3317,7 +3319,7 @@ void Query_cache::invalidate_table(THD *thd, uchar * key, size_t key_length)
   DEBUG_SYNC(thd, "wait_in_query_cache_invalidate2");
 
   if (query_cache_size > 0)
-    invalidate_table_internal(thd, key, key_length);
+    invalidate_table_internal(key, key_length);
 
   unlock();
 }
@@ -3332,14 +3334,14 @@ void Query_cache::invalidate_table(THD *thd, uchar * key, size_t key_length)
 */
 
 void
-Query_cache::invalidate_table_internal(THD *thd, uchar *key, size_t key_length)
+Query_cache::invalidate_table_internal(uchar *key, size_t key_length)
 {
   Query_cache_block *table_block=
     (Query_cache_block*)my_hash_search(&tables, key, key_length);
   if (table_block)
   {
     Query_cache_block_table *list_root= table_block->table(0);
-    invalidate_query_block_list(thd, list_root);
+    invalidate_query_block_list(list_root);
   }
 }
 
@@ -3356,8 +3358,7 @@ Query_cache::invalidate_table_internal(THD *thd, uchar *key, size_t key_length)
 */
 
 void
-Query_cache::invalidate_query_block_list(THD *thd,
-                                         Query_cache_block_table *list_root)
+Query_cache::invalidate_query_block_list(Query_cache_block_table *list_root)
 {
   while (list_root->next != list_root)
   {
@@ -3541,7 +3542,7 @@ Query_cache::insert_table(THD *thd, size_t key_len, const char *key,
     */
     {
       Query_cache_block_table *list_root= table_block->table(0);
-      invalidate_query_block_list(thd, list_root);
+      invalidate_query_block_list(list_root);
     }
 
     table_block= 0;
@@ -4767,7 +4768,7 @@ void Query_cache::cache_dump()
 
 void Query_cache::queries_dump()
 {
-
+#ifdef DBUG_TRACE
   if (!initialized)
   {
     DBUG_PRINT("qcache", ("Query Cache not initialized"));
@@ -4828,11 +4829,13 @@ void Query_cache::queries_dump()
     DBUG_PRINT("qcache", ("no queries in list"));
   }
   DBUG_PRINT("qcache", ("------------------"));
+#endif
 }
 
 
 void Query_cache::tables_dump()
 {
+#ifdef DBUG_TRACE
   if (!initialized || query_cache_size == 0)
   {
     DBUG_PRINT("qcache", ("Query Cache not initialized"));
@@ -4855,6 +4858,7 @@ void Query_cache::tables_dump()
   else
     DBUG_PRINT("qcache", ("no tables in list"));
   DBUG_PRINT("qcache", ("--------------------"));
+#endif
 }
 
 

@@ -197,6 +197,9 @@ select * from v1m where (c2, b1) in (select distinct c2, b1 from v2m where b1 is
 
 drop view v1, v2, v1m, v2m;
 
+#--view-protocol is disabled because view gives another query plan
+--disable_view_protocol
+
 # nested subqueries, views
 explain extended
 select * from t1
@@ -330,6 +333,7 @@ explain extended
 select * from t1 where (a1, a2) in (select '1 - 01', '2 - 01' from dual);
 select * from t1 where (a1, a2) in (select '1 - 01', '2 - 01' from dual);
 
+--enable_view_protocol
 
 /******************************************************************************
 * Subqueries in other uncovered clauses.
@@ -519,6 +523,8 @@ where a1 in (select substring(b1,1,512) from t2_512 where b1 > '0');
 # group_concat with a blob argument - depends on
 # the variable group_concat_max_len, and
 # convert_blob_length == max_len*collation->mbmaxlen > CONVERT_IF_BIGGER_TO_BLOB
+#Check after fix MDEV-31276
+--disable_ps2_protocol
 explain extended select left(a1,7), left(a2,7)
 from t1_512
 where a1 in (select group_concat(b1) from t2_512 group by b2);
@@ -536,6 +542,7 @@ where a1 in (select group_concat(b1) from t2_512 group by b2);
 select left(a1,7), left(a2,7)
 from t1_512
 where a1 in (select group_concat(b1) from t2_512 group by b2);
+--enable_ps2_protocol
 
 drop table t1_512, t2_512, t3_512;
 
@@ -601,6 +608,8 @@ where a1 in (select substring(b1,1,1024) from t2_1024 where b1 > '0');
 # group_concat with a blob argument - depends on
 # the variable group_concat_max_len, and
 # convert_blob_length == max_len*collation->mbmaxlen > CONVERT_IF_BIGGER_TO_BLOB
+#Check after fix MDEV-31276
+--disable_ps2_protocol
 explain extended select left(a1,7), left(a2,7)
 from t1_1024
 where a1 in (select group_concat(b1) from t2_1024 group by b2);
@@ -618,6 +627,7 @@ where a1 in (select group_concat(b1) from t2_1024 group by b2);
 select left(a1,7), left(a2,7)
 from t1_1024
 where a1 in (select group_concat(b1) from t2_1024 group by b2);
+--enable_ps2_protocol
 
 drop table t1_1024, t2_1024, t3_1024;
 
@@ -683,6 +693,8 @@ where a1 in (select substring(b1,1,1025) from t2_1025 where b1 > '0');
 # group_concat with a blob argument - depends on
 # the variable group_concat_max_len, and
 # convert_blob_length == max_len*collation->mbmaxlen > CONVERT_IF_BIGGER_TO_BLOB
+#Check after fix MDEV-31276
+--disable_ps2_protocol
 explain extended select left(a1,7), left(a2,7)
 from t1_1025
 where a1 in (select group_concat(b1) from t2_1025 group by b2);
@@ -700,6 +712,7 @@ where a1 in (select group_concat(b1) from t2_1025 group by b2);
 select left(a1,7), left(a2,7)
 from t1_1025
 where a1 in (select group_concat(b1) from t2_1025 group by b2);
+--enable_ps2_protocol
 
 drop table t1_1025, t2_1025, t3_1025;
 
@@ -814,6 +827,9 @@ explain extended
 select a from t1 group by a having a in (select c from t2 where d >= 20);
 select a from t1 group by a having a in (select c from t2 where d >= 20);
 
+#--view-protocol is disabled because view gives another query plan
+--disable_view_protocol
+
 explain extended
 select a from t1 group by a
 having a in (select c from t2 where d >= some(select e from t3 where max(b)=e));
@@ -824,6 +840,7 @@ select a from t1
 where a in (select c from t2 where d >= some(select e from t3 where b=e));
 select a from t1
 where a in (select c from t2 where d >= some(select e from t3 where b=e));
+--enable_view_protocol
 
 drop table t1, t2, t3;
 

@@ -120,7 +120,7 @@ PQRYRES PIVAID::MakePivotColumns(PGLOBAL g)
 			uint n = strlen(Skcol);
 
 			skc = (char*)PlugSubAlloc(g, NULL, n + 2);
-			strcpy(skc, Skcol);
+			snprintf(skc, n + 2, "%s", Skcol);
 			skc[n + 1] = 0;
 
 			// Replace ; by nulls in skc
@@ -133,9 +133,9 @@ PQRYRES PIVAID::MakePivotColumns(PGLOBAL g)
 		if (!Tabsrc && Tabname) {
 			// Locate the  query
 			query = (char*)PlugSubAlloc(g, NULL, strlen(Tabname) + 26);
-			sprintf(query, "SELECT * FROM `%s` LIMIT 1", Tabname);
+			snprintf(query, strlen(Tabname) + 26, "SELECT * FROM `%s` LIMIT 1", Tabname);
 		} else if (!Tabsrc) {
-			strcpy(g->Message, MSG(SRC_TABLE_UNDEF));
+			snprintf(g->Message, sizeof(g->Message), MSG(SRC_TABLE_UNDEF));
 			goto err;
 		} else
 			query = (char*)Tabsrc;
@@ -167,7 +167,7 @@ PQRYRES PIVAID::MakePivotColumns(PGLOBAL g)
 					Fncol = crp->Name;
 
 			if (!Fncol) {
-				strcpy(g->Message, MSG(NO_DEF_FNCCOL));
+				snprintf(g->Message, sizeof(g->Message), MSG(NO_DEF_FNCCOL));
 				goto err;
 			} // endif Fncol
 
@@ -180,7 +180,7 @@ PQRYRES PIVAID::MakePivotColumns(PGLOBAL g)
 					Picol = crp->Name;
 
 			if (!Picol) {
-				strcpy(g->Message, MSG(NO_DEF_PIVOTCOL));
+				snprintf(g->Message, sizeof(g->Message),  MSG(NO_DEF_PIVOTCOL));
 				goto err;
 			} // endif Picol
 
@@ -193,7 +193,7 @@ PQRYRES PIVAID::MakePivotColumns(PGLOBAL g)
 				*pcrp = crp->Next;
 			} else if (!stricmp(Picol, crp->Name)) {
 				if (crp->Nulls) {
-					sprintf(g->Message, "Pivot column %s cannot be nullable", Picol);
+					snprintf(g->Message, sizeof(g->Message), "Pivot column %s cannot be nullable", Picol);
 					goto err;
 				} // endif Nulls
 
@@ -206,10 +206,10 @@ PQRYRES PIVAID::MakePivotColumns(PGLOBAL g)
 				pcrp = &crp->Next;
 		}
 		if (!Rblkp) {
-			strcpy(g->Message, MSG(NO_DEF_PIVOTCOL));
+			snprintf(g->Message, sizeof(g->Message), MSG(NO_DEF_PIVOTCOL));
 			goto err;
 		} else if (!fncrp) {
-			strcpy(g->Message, MSG(NO_DEF_FNCCOL));
+			snprintf(g->Message, sizeof(g->Message), MSG(NO_DEF_FNCCOL));
 			goto err;
 		} // endif
 
@@ -302,7 +302,7 @@ PQRYRES PIVAID::MakePivotColumns(PGLOBAL g)
 		if (trace(1))
 			htrc("Exception %d: %s\n", n, g->Message);
 	} catch (const char *msg) {
-		strcpy(g->Message, msg);
+		snprintf(g->Message, sizeof(g->Message), "%s", msg);
 	} // end catch
 
 err:
@@ -442,7 +442,7 @@ bool TDBPIVOT::FindDefaultColumns(PGLOBAL g)
         Fncol = cdp->GetName();
   
     if (!Fncol) {
-      strcpy(g->Message, MSG(NO_DEF_FNCCOL));
+      snprintf(g->Message, sizeof(g->Message), MSG(NO_DEF_FNCCOL));
       return true;
       } // endif Fncol
   
@@ -455,7 +455,7 @@ bool TDBPIVOT::FindDefaultColumns(PGLOBAL g)
         Picol = cdp->GetName();
   
     if (!Picol) {
-      strcpy(g->Message, MSG(NO_DEF_PIVOTCOL));
+      snprintf(g->Message, sizeof(g->Message), MSG(NO_DEF_PIVOTCOL));
       return true;
       } // endif Picol
   
@@ -518,7 +518,7 @@ bool TDBPIVOT::GetSourceTable(PGLOBAL g)
       } // endif !GBdone
 
   } else if (!Tabsrc) {
-    strcpy(g->Message, MSG(SRC_TABLE_UNDEF));
+    snprintf(g->Message, sizeof(g->Message), MSG(SRC_TABLE_UNDEF));
     return true;
   } // endif
 
@@ -549,14 +549,14 @@ bool TDBPIVOT::MakePivotColumns(PGLOBAL g)
     // Now it is time to allocate the pivot and function columns
     if (!(Fcolp = Tdbp->ColDB(g, Fncol, 0))) {
       // Function column not found in table                                       
-      sprintf(g->Message, MSG(COL_ISNOT_TABLE), Fncol, Tabname);
+      snprintf(g->Message, sizeof(g->Message), MSG(COL_ISNOT_TABLE), Fncol, Tabname);
       return true;
     } else if (Fcolp->InitValue(g))
       return true;
 
     if (!(Xcolp = Tdbp->ColDB(g, Picol, 0))) {
       // Pivot column not found in table                                       
-      sprintf(g->Message, MSG(COL_ISNOT_TABLE), Picol, Tabname);
+      snprintf(g->Message, sizeof(g->Message), MSG(COL_ISNOT_TABLE), Picol, Tabname);
       return true;
     } else if (Xcolp->InitValue(g))
       return true;
@@ -587,18 +587,18 @@ bool TDBPIVOT::MakeViewColumns(PGLOBAL g)
     PTDBMY tdbp;
 
     if (Tdbp->GetAmType() != TYPE_AM_MYSQL) {
-      strcpy(g->Message, "View is not MySQL");
+      snprintf(g->Message, sizeof(g->Message),"View is not MySQL");
       return true;
     } else
       tdbp = (PTDBMY)Tdbp;
 
     if (!Fncol && !(Fncol = tdbp->FindFieldColumn(Picol))) {
-      strcpy(g->Message, MSG(NO_DEF_FNCCOL));
+      snprintf(g->Message, sizeof(g->Message),  MSG(NO_DEF_FNCCOL));
       return true;
       } // endif Fncol
 
     if (!Picol && !(Picol = tdbp->FindFieldColumn(Fncol))) {
-      strcpy(g->Message, MSG(NO_DEF_PIVOTCOL));
+      snprintf(g->Message, sizeof(g->Message), MSG(NO_DEF_PIVOTCOL));
       return true;
       } // endif Picol
 
@@ -670,7 +670,7 @@ bool TDBPIVOT::OpenDB(PGLOBAL g)
     /*******************************************************************/
     /* Currently PIVOT tables cannot be modified.                      */
     /*******************************************************************/
-    sprintf(g->Message, MSG(TABLE_READ_ONLY), "PIVOT");
+    snprintf(g->Message, sizeof(g->Message), MSG(TABLE_READ_ONLY), "PIVOT");
     return TRUE;
     } // endif Mode
 
@@ -678,7 +678,7 @@ bool TDBPIVOT::OpenDB(PGLOBAL g)
     /*******************************************************************/
     /* Direct access of PIVOT tables is not implemented yet.           */
     /*******************************************************************/
-    strcpy(g->Message, MSG(NO_PIV_DIR_ACC));
+    snprintf(g->Message, sizeof(g->Message), MSG(NO_PIV_DIR_ACC));
     return TRUE;
     } // endif To_Key_Col
 
@@ -779,7 +779,7 @@ int TDBPIVOT::ReadDB(PGLOBAL g)
 
     if (!colp && !(colp = Dcolp)) {
       if (!Accept) {
-        strcpy(g->Message, MSG(NO_MATCH_COL));
+        snprintf(g->Message, sizeof(g->Message), MSG(NO_MATCH_COL));
         return RC_FX;
       } else
         continue;
@@ -799,7 +799,7 @@ int TDBPIVOT::ReadDB(PGLOBAL g)
 /***********************************************************************/
 int TDBPIVOT::WriteDB(PGLOBAL g)
   {
-  sprintf(g->Message, MSG(TABLE_READ_ONLY), "PIVOT");
+  snprintf(g->Message, sizeof(g->Message), MSG(TABLE_READ_ONLY), "PIVOT");
   return RC_FX;
   } // end of WriteDB
 
@@ -808,7 +808,7 @@ int TDBPIVOT::WriteDB(PGLOBAL g)
 /***********************************************************************/
 int TDBPIVOT::DeleteDB(PGLOBAL g, int)
   {
-  sprintf(g->Message, MSG(NO_TABLE_DEL), "PIVOT");
+  snprintf(g->Message, sizeof(g->Message), MSG(NO_TABLE_DEL), "PIVOT");
   return RC_FX;
   } // end of DeleteDB
 

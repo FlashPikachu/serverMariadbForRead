@@ -256,6 +256,50 @@ Alter_info::algorithm(const THD *thd) const
 }
 
 
+uint Alter_info::check_vcol_field(Item_field *item) const
+{
+  /*
+    vcol->flags are modified in-place, so we'll need to reset them
+    if ALTER fails for any reason
+  */
+  if (item->field && !item->field->table->needs_reopen())
+    item->field->table->mark_table_for_reopen();
+
+  if (!item->field &&
+      ((item->db_name.length && !db.streq(item->db_name)) ||
+       (item->table_name.length && !table_name.streq(item->table_name))))
+  {
+    char *ptr= (char*)current_thd->alloc(item->db_name.length +
+                                         item->table_name.length +
+                                         item->field_name.length + 3);
+    strxmov(ptr, safe_str(item->db_name.str), item->db_name.length ? "." : "",
+            item->table_name.str, ".", item->field_name.str, NullS);
+    item->field_name.str= ptr;
+    return VCOL_IMPOSSIBLE;
+  }
+  for (Key &k: key_list)
+  {
+    if (k.type != Key::FOREIGN_KEY)
+      continue;
+    Foreign_key *fk= (Foreign_key*) &k;
+    if (fk->update_opt < FK_OPTION_CASCADE &&
+        fk->delete_opt < FK_OPTION_SET_NULL)
+      continue;
+    for (Key_part_spec& kp: fk->columns)
+    {
+      if (item->field_name.streq(kp.field_name))
+        return VCOL_NON_DETERMINISTIC;
+    }
+  }
+  for (Create_field &cf: create_list)
+  {
+    if (item->field_name.streq(cf.field_name))
+      return cf.vcol_info ? cf.vcol_info->flags : 0;
+  }
+  return 0;
+}
+
+
 Alter_table_ctx::Alter_table_ctx()
   : db(null_clex_str), table_name(null_clex_str), alias(null_clex_str),
     new_db(null_clex_str), new_name(null_clex_str), new_alias(null_clex_str)
@@ -411,7 +455,7 @@ bool Sql_cmd_alter_table::execute(THD *thd)
     referenced from this structure will be modified.
     @todo move these into constructor...
   */
-  HA_CREATE_INFO create_info(lex->create_info);
+  Table_specification_st create_info(lex->create_info);
   Alter_info alter_info(lex->alter_info, thd->mem_root);
   create_info.alter_info= &alter_info;
   privilege_t priv(NO_ACL);
@@ -513,8 +557,18 @@ bool Sql_cmd_alter_table::execute(THD *thd)
       DBUG_RETURN(TRUE);
     }
 
-    thd->variables.auto_increment_offset = 1;
-    thd->variables.auto_increment_increment = 1;
+    /*
+      It makes sense to set auto_increment_* to defaults in TOI operations.
+      Must be done before wsrep_TOI_begin() since Query_log_event encapsulating
+      TOI statement and auto inc variables for wsrep replication is constructed
+      there. Variables are reset back in THD::reset_for_next_command() before
+      processing of next command.
+    */
+    if (wsrep_auto_increment_control)
+    {
+      thd->variables.auto_increment_offset = 1;
+      thd->variables.auto_increment_increment = 1;
+    }
   }
 #endif
 
@@ -544,9 +598,11 @@ bool Sql_cmd_alter_table::execute(THD *thd)
   thd->work_part_info= 0;
 #endif
 
+  Recreate_info recreate_info;
   result= mysql_alter_table(thd, &select_lex->db, &lex->name,
                             &create_info,
                             first_table,
+                            &recreate_info,
                             &alter_info,
                             select_lex->order_list.elements,
                             select_lex->order_list.first,

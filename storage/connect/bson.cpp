@@ -10,6 +10,7 @@
 /*  Include relevant sections of the MariaDB header file.              */
 /***********************************************************************/
 #include <my_global.h>
+#include <m_string.h>
 
 /***********************************************************************/
 /*  Include application header files:                                  */
@@ -135,7 +136,7 @@ PBVAL BDOC::ParseJson(PGLOBAL g, char* js, size_t lng)
           break;
         } // endif pretty
 
-        sprintf(g->Message, "Unexpected ',' (pretty=%d)", pretty);
+        snprintf(g->Message, sizeof(g->Message), "Unexpected ',' (pretty=%d)", pretty);
         throw 3;
       case '(':
         b = true;
@@ -159,7 +160,7 @@ PBVAL BDOC::ParseJson(PGLOBAL g, char* js, size_t lng)
       }; // endswitch s[i]
 
     if (bvp->Type == TYPE_UNKNOWN)
-      sprintf(g->Message, "Invalid Json string '%.*s'", MY_MIN((int)len, 50), s);
+      snprintf(g->Message, sizeof(g->Message), "Invalid Json string '%.*s'", MY_MIN((int)len, 50), s);
     else if (pretty == 3) {
       for (i = 0; i < 3; i++)
         if (pty[i]) {
@@ -214,7 +215,7 @@ OFFSET BDOC::ParseArray(size_t& i)
     switch (s[i]) {
     case ',':
       if (level < 2) {
-        sprintf(G->Message, "Unexpected ',' near %.*s", (int) ARGS);
+        snprintf(G->Message, sizeof(G->Message), "Unexpected ',' near %.*s", (int) ARGS);
         throw 1;
       } else
         level = 1;
@@ -222,7 +223,7 @@ OFFSET BDOC::ParseArray(size_t& i)
       break;
     case ']':
       if (level == 1) {
-        sprintf(G->Message, "Unexpected ',]' near %.*s", (int) ARGS);
+        snprintf(G->Message, sizeof(G->Message), "Unexpected ',]' near %.*s", (int) ARGS);
         throw 1;
       } // endif level
 
@@ -236,7 +237,7 @@ OFFSET BDOC::ParseArray(size_t& i)
       break;
     default:
       if (level == 2) {
-        sprintf(G->Message, "Unexpected value near %.*s", (int) ARGS);
+        snprintf(G->Message, sizeof(G->Message), "Unexpected value near %.*s", (int) ARGS);
         throw 1;
       } else if (lastvlp) {
         vlp = ParseValue(i, NewVal());
@@ -283,7 +284,7 @@ OFFSET BDOC::ParseObject(size_t& i)
 
         level = 2;
       } else {
-        sprintf(G->Message, "misplaced string near %.*s", (int) ARGS);
+        snprintf(G->Message, sizeof(G->Message), "misplaced string near %.*s", (int) ARGS);
         throw 2;
       } // endif level
 
@@ -293,14 +294,14 @@ OFFSET BDOC::ParseObject(size_t& i)
         ParseValue(++i, GetVlp(lastbpp));
         level = 3;
       } else {
-        sprintf(G->Message, "Unexpected ':' near %.*s", (int) ARGS);
+        snprintf(G->Message, sizeof(G->Message), "Unexpected ':' near %.*s", (int) ARGS);
         throw 2;
       } // endif level
 
       break;
     case ',':
       if (level < 3) {
-        sprintf(G->Message, "Unexpected ',' near %.*s", (int) ARGS);
+        snprintf(G->Message, sizeof(G->Message), "Unexpected ',' near %.*s", (int) ARGS);
         throw 2;
       } else
         level = 1;
@@ -308,7 +309,7 @@ OFFSET BDOC::ParseObject(size_t& i)
       break;
     case '}':
       if (!(level == 0 || level == 3)) {
-        sprintf(G->Message, "Unexpected '}' near %.*s", (int) ARGS);
+        snprintf(G->Message, sizeof(G->Message), "Unexpected '}' near %.*s", (int) ARGS);
         throw 2;
       } // endif level
 
@@ -320,7 +321,7 @@ OFFSET BDOC::ParseObject(size_t& i)
     case '\t':
       break;
     default:
-      sprintf(G->Message, "Unexpected character '%c' near %.*s",
+      snprintf(G->Message, sizeof(G->Message), "Unexpected character '%c' near %.*s",
         s[i], (int) ARGS);
       throw 2;
     }; // endswitch s[i]
@@ -398,7 +399,7 @@ suite:
   return bvp;
 
 err:
-  sprintf(G->Message, "Unexpected character '%c' near %.*s", s[i], (int) ARGS);
+  snprintf(G->Message, sizeof(G->Message), "Unexpected character '%c' near %.*s", s[i], (int) ARGS);
   throw 3;
 } // end of ParseValue
 
@@ -598,7 +599,7 @@ PSZ BDOC::Serialize(PGLOBAL g, PBVAL bvp, char* fn, int pretty)
 
   try {
     if (!bvp) {
-      strcpy(g->Message, "Null json tree");
+      safe_strcpy(g->Message, sizeof(g->Message), "Null json tree");
       throw 1;
     } else if (!fn) {
       // Serialize to a string
@@ -606,9 +607,8 @@ PSZ BDOC::Serialize(PGLOBAL g, PBVAL bvp, char* fn, int pretty)
       b = pretty == 1;
     } else {
       if (!(fs = fopen(fn, "wb"))) {
-        sprintf(g->Message, MSG(OPEN_MODE_ERROR),
-          "w", (int)errno, fn);
-        strcat(strcat(g->Message, ": "), strerror(errno));
+        snprintf(g->Message, sizeof(g->Message), MSG(OPEN_MODE_ERROR) ": %s",
+          "w", (int)errno, fn, strerror(errno));
         throw 2;
       } else if (pretty >= 2) {
         // Serialize to a pretty file
@@ -758,16 +758,16 @@ bool BDOC::SerializeValue(PBVAL jvp, bool b)
       return jp->Escape(MZP(jvp->To_Val));
 
   case TYPE_INTG:
-    sprintf(buf, "%d", jvp->N);
+    snprintf(buf, sizeof(buf), "%d", jvp->N);
     return jp->WriteStr(buf);
   case TYPE_BINT:
-    sprintf(buf, "%lld", *(longlong*)MakePtr(Base, jvp->To_Val));
+    snprintf(buf, sizeof(buf), "%lld", *(longlong*)MakePtr(Base, jvp->To_Val));
     return jp->WriteStr(buf);
   case TYPE_FLOAT:
-    sprintf(buf, "%.*f", jvp->Nd, jvp->F);
+    snprintf(buf, sizeof(buf), "%.*f", jvp->Nd, jvp->F);
     return jp->WriteStr(buf);
   case TYPE_DBL:
-    sprintf(buf, "%.*lf", jvp->Nd, *(double*)MakePtr(Base, jvp->To_Val));
+    snprintf(buf, sizeof(buf), "%.*lf", jvp->Nd, *(double*)MakePtr(Base, jvp->To_Val));
     return jp->WriteStr(buf);
   case TYPE_NULL:
     return jp->WriteStr("null");
@@ -797,7 +797,7 @@ void* BJSON::BsonSubAlloc(size_t size)
     memp, size, pph->To_Free, pph->FreeBlk);
 
   if (size > pph->FreeBlk) {   /* Not enough memory left in pool */
-    sprintf(G->Message,
+    snprintf(G->Message, sizeof(G->Message),
       "Not enough memory for request of %zd (used=%zd free=%zd)",
       size, pph->To_Free, pph->FreeBlk);
     xtrc(1, "BsonSubAlloc: %s\n", G->Message);
@@ -1679,7 +1679,7 @@ PBVAL BJSON::SetValue(PBVAL vlp, PVAL valp)
 
       break;
     default:
-      sprintf(G->Message, "Unsupported typ %d\n", valp->GetType());
+      snprintf(G->Message, sizeof(G->Message), "Unsupported typ %d\n", valp->GetType());
       throw(777);
   } // endswitch Type
 

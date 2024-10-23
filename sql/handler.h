@@ -2,7 +2,7 @@
 #define HANDLER_INCLUDED
 /*
    Copyright (c) 2000, 2019, Oracle and/or its affiliates.
-   Copyright (c) 2009, 2022, MariaDB
+   Copyright (c) 2009, 2023, MariaDB
 
    This program is free software; you can redistribute it and/or
    modify it under the terms of the GNU General Public License
@@ -35,6 +35,7 @@
 #include "sql_array.h"          /* Dynamic_array<> */
 #include "mdl.h"
 #include "vers_string.h"
+#include "ha_handler_stats.h"
 
 #include "sql_analyze_stmt.h" // for Exec_time_tracker 
 
@@ -45,6 +46,7 @@
 #include "sql_sequence.h"
 #include "mem_root_array.h"
 #include <utility>     // pair
+#include <my_attribute.h> /* __attribute__ */
 
 class Alter_info;
 class Virtual_column_info;
@@ -357,9 +359,9 @@ enum chf_create_flags {
   Rowid's are not comparable. This is set if the rowid is unique to the
   current open handler, like it is with federated where the rowid is a
   pointer to a local result set buffer. The effect of having this set is
-  that the optimizer will not consirer the following optimizations for
+  that the optimizer will not consider the following optimizations for
   the table:
-  ror scans or filtering
+  ror scans, filtering or duplicate weedout
 */
 #define HA_NON_COMPARABLE_ROWID (1ULL << 60)
 
@@ -841,6 +843,8 @@ typedef bool Log_func(THD*, TABLE*, bool, const uchar*, const uchar*);
 #define ALTER_PARTITION_TABLE_REORG (1ULL << 12)
 #define ALTER_PARTITION_CONVERT_IN  (1ULL << 13)
 #define ALTER_PARTITION_CONVERT_OUT (1ULL << 14)
+// Set for vers_add_auto_hist_parts() operation
+#define ALTER_PARTITION_AUTO_HIST   (1ULL << 15)
 
 /*
   This is master database for most of system tables. However there
@@ -887,7 +891,7 @@ struct xid_t {
   long bqual_length;
   char data[XIDDATASIZE];  // not \0-terminated !
 
-  xid_t() {}                                /* Remove gcc warning */
+  xid_t() = default;                                /* Remove gcc warning */
   bool eq(struct xid_t *xid) const
   { return !xid->is_null() && eq(xid->gtrid_length, xid->bqual_length, xid->data); }
   bool eq(long g, long b, const char *d) const
@@ -965,6 +969,7 @@ typedef struct xid_t XID;
 */
 typedef uint Binlog_file_id;
 const Binlog_file_id MAX_binlog_id= UINT_MAX;
+const my_off_t       MAX_off_t    = (~(my_off_t) 0);
 /*
   Compound binlog-id and byte offset of transaction's first event
   in a sequence (e.g the recovery sequence) of binlog files.
@@ -979,14 +984,22 @@ struct xid_recovery_member
   my_xid xid;
   uint in_engine_prepare;  // number of engines that have xid prepared
   bool decided_to_commit;
-  Binlog_offset binlog_coord; // semisync recovery binlog offset
+  /*
+    Semisync recovery binlog offset. It's initialized with the maximum
+    unreachable offset. The max value will remain for any transaction
+    not found in binlog to yield its rollback decision as it's guaranteed
+    to be within a truncated tail part of the binlog.
+  */
+  Binlog_offset binlog_coord;
   XID *full_xid;           // needed by wsrep or past it recovery
   decltype(::server_id) server_id;         // server id of orginal server
 
   xid_recovery_member(my_xid xid_arg, uint prepare_arg, bool decided_arg,
                       XID *full_xid_arg, decltype(::server_id) server_id_arg)
     : xid(xid_arg), in_engine_prepare(prepare_arg),
-      decided_to_commit(decided_arg), full_xid(full_xid_arg) , server_id(server_id_arg) {};
+      decided_to_commit(decided_arg),
+      binlog_coord(Binlog_offset(MAX_binlog_id, MAX_off_t)),
+      full_xid(full_xid_arg), server_id(server_id_arg) {};
 };
 
 /* for recover() handlerton call */
@@ -1023,7 +1036,10 @@ enum enum_schema_tables
   SCH_ENABLED_ROLES,
   SCH_ENGINES,
   SCH_EVENTS,
-  SCH_EXPLAIN,
+  SCH_EXPLAIN_TABULAR,
+  SCH_EXPLAIN_JSON,
+  SCH_ANALYZE_TABULAR,
+  SCH_ANALYZE_JSON,
   SCH_FILES,
   SCH_GLOBAL_STATUS,
   SCH_GLOBAL_VARIABLES,
@@ -1446,9 +1462,9 @@ struct handlerton
                             const char *query, uint query_length,
                             const char *db, const char *table_name);
 
-   void (*abort_transaction)(handlerton *hton, THD *bf_thd,
-			    THD *victim_thd, my_bool signal);
-   int (*set_checkpoint)(handlerton *hton, const XID* xid);
+   void (*abort_transaction)(handlerton *hton, THD *bf_thd, THD *victim_thd,
+                             my_bool signal) __attribute__((nonnull));
+   int (*set_checkpoint)(handlerton *hton, const XID *xid);
    int (*get_checkpoint)(handlerton *hton, XID* xid);
   /**
      Check if the version of the table matches the version in the .frm
@@ -1567,7 +1583,7 @@ struct handlerton
      public:
      virtual bool add_table(const char *tname, size_t tlen) = 0;
      virtual bool add_file(const char *fname) = 0;
-     protected: virtual ~discovered_list() {}
+     protected: virtual ~discovered_list() = default;
    };
 
    /*
@@ -1810,7 +1826,7 @@ struct THD_TRANS
     m_unsafe_rollback_flags= 0;
   }
   bool is_empty() const { return ha_list == NULL; }
-  THD_TRANS() {}                        /* Remove gcc warning */
+  THD_TRANS() = default;                        /* Remove gcc warning */
 
   unsigned int m_unsafe_rollback_flags;
  /*
@@ -2051,7 +2067,7 @@ struct Table_period_info: Sql_alloc
 
   struct start_end_t
   {
-    start_end_t() {};
+    start_end_t() = default;
     start_end_t(const LEX_CSTRING& _start, const LEX_CSTRING& _end) :
       start(_start),
       end(_end) {}
@@ -2082,12 +2098,12 @@ struct Vers_parse_info: public Table_period_info
   Vers_parse_info() :
     Table_period_info(STRING_WITH_LEN("SYSTEM_TIME")),
     versioned_fields(false),
-    unversioned_fields(false)
+    unversioned_fields(false),
+    can_native(-1)
   {}
 
   Table_period_info::start_end_t as_row;
 
-protected:
   friend struct Table_scope_and_contents_source_st;
   void set_start(const LEX_CSTRING field_name)
   {
@@ -2099,6 +2115,8 @@ protected:
     as_row.end= field_name;
     period.end= field_name;
   }
+
+protected:
   bool is_start(const char *name) const;
   bool is_end(const char *name) const;
   bool is_start(const Create_field &f) const;
@@ -2111,6 +2129,9 @@ protected:
   bool need_check(const Alter_info *alter_info) const;
   bool check_conditions(const Lex_table_name &table_name,
                         const Lex_table_name &db) const;
+  bool create_sys_field(THD *thd, const char *field_name,
+                        Alter_info *alter_info, int flags);
+
 public:
   static const Lex_ident default_start;
   static const Lex_ident default_end;
@@ -2128,6 +2149,7 @@ public:
   */
   bool versioned_fields : 1;
   bool unversioned_fields : 1;
+  int can_native;
 };
 
 /**
@@ -2246,6 +2268,7 @@ struct Table_scope_and_contents_source_st:
                     int select_count= 0);
   bool check_period_fields(THD *thd, Alter_info *alter_info);
 
+  void vers_check_native();
   bool vers_fix_system_fields(THD *thd, Alter_info *alter_info,
                               const TABLE_LIST &create_table);
 
@@ -2253,7 +2276,6 @@ struct Table_scope_and_contents_source_st:
                                 const Lex_table_name &table_name,
                                 const Lex_table_name &db,
                                 int select_count= 0);
-
 };
 
 
@@ -2274,33 +2296,6 @@ struct HA_CREATE_INFO: public Table_scope_and_contents_source_st,
     Schema_specification_st::init();
     alter_info= NULL;
   }
-  bool check_conflicting_charset_declarations(CHARSET_INFO *cs);
-  bool add_table_option_default_charset(CHARSET_INFO *cs)
-  {
-    // cs can be NULL, e.g.:  CREATE TABLE t1 (..) CHARACTER SET DEFAULT;
-    if (check_conflicting_charset_declarations(cs))
-      return true;
-    default_table_charset= cs;
-    used_fields|= HA_CREATE_USED_DEFAULT_CHARSET;
-    return false;
-  }
-  bool add_alter_list_item_convert_to_charset(CHARSET_INFO *cs)
-  {
-    /* 
-      cs cannot be NULL, as sql_yacc.yy translates
-         CONVERT TO CHARACTER SET DEFAULT
-      to
-         CONVERT TO CHARACTER SET <character-set-of-the-current-database>
-      TODO: Shouldn't we postpone resolution of DEFAULT until the
-      character set of the table owner database is loaded from its db.opt?
-    */
-    DBUG_ASSERT(cs);
-    if (check_conflicting_charset_declarations(cs))
-      return true;
-    alter_table_convert_to_charset= default_table_charset= cs;
-    used_fields|= (HA_CREATE_USED_CHARSET | HA_CREATE_USED_DEFAULT_CHARSET);  
-    return false;
-  }
   ulong table_options_with_row_type()
   {
     if (row_type == ROW_TYPE_DYNAMIC || row_type == ROW_TYPE_PAGE)
@@ -2308,6 +2303,10 @@ struct HA_CREATE_INFO: public Table_scope_and_contents_source_st,
     else
       return table_options;
   }
+  bool resolve_to_charset_collation_context(THD *thd,
+                  const Lex_table_charset_collation_attrs_st &default_cscl,
+                  const Lex_table_charset_collation_attrs_st &convert_cscl,
+                  const Charset_collation_context &ctx);
 };
 
 
@@ -2318,16 +2317,23 @@ struct HA_CREATE_INFO: public Table_scope_and_contents_source_st,
 struct Table_specification_st: public HA_CREATE_INFO,
                                public DDL_options_st
 {
+  Lex_table_charset_collation_attrs_st default_charset_collation;
+  Lex_table_charset_collation_attrs_st convert_charset_collation;
+
   // Deep initialization
   void init()
   {
     HA_CREATE_INFO::init();
     DDL_options_st::init();
+    default_charset_collation.init();
+    convert_charset_collation.init();
   }
   void init(DDL_options_st::Options options_arg)
   {
     HA_CREATE_INFO::init();
     DDL_options_st::init(options_arg);
+    default_charset_collation.init();
+    convert_charset_collation.init();
   }
   /*
     Quick initialization, for parser.
@@ -2339,6 +2345,46 @@ struct Table_specification_st: public HA_CREATE_INFO,
   {
     HA_CREATE_INFO::options= 0;
     DDL_options_st::init();
+    default_charset_collation.init();
+    convert_charset_collation.init();
+  }
+
+  bool add_table_option_convert_charset(CHARSET_INFO *cs)
+  {
+    // cs can be NULL, e.g.: ALTER TABLE t1 CONVERT TO CHARACTER SET DEFAULT;
+    used_fields|= (HA_CREATE_USED_CHARSET | HA_CREATE_USED_DEFAULT_CHARSET);
+    return cs ?
+      convert_charset_collation.merge_exact_charset(Lex_exact_charset(cs)) :
+      convert_charset_collation.merge_charset_default();
+  }
+  bool add_table_option_convert_collation(const Lex_extended_collation_st &cl)
+  {
+    used_fields|= (HA_CREATE_USED_CHARSET | HA_CREATE_USED_DEFAULT_CHARSET);
+    return convert_charset_collation.merge_collation(cl);
+  }
+
+  bool add_table_option_default_charset(CHARSET_INFO *cs)
+  {
+    // cs can be NULL, e.g.:  CREATE TABLE t1 (..) CHARACTER SET DEFAULT;
+    used_fields|= HA_CREATE_USED_DEFAULT_CHARSET;
+    return cs ?
+      default_charset_collation.merge_exact_charset(Lex_exact_charset(cs)) :
+      default_charset_collation.merge_charset_default();
+  }
+  bool add_table_option_default_collation(const Lex_extended_collation_st &cl)
+  {
+    used_fields|= HA_CREATE_USED_DEFAULT_CHARSET;
+    return default_charset_collation.merge_collation(cl);
+  }
+
+  bool resolve_to_charset_collation_context(THD *thd,
+                                         const Charset_collation_context &ctx)
+  {
+    return HA_CREATE_INFO::
+             resolve_to_charset_collation_context(thd,
+                                                  default_charset_collation,
+                                                  convert_charset_collation,
+                                                  ctx);
   }
 };
 
@@ -2381,9 +2427,9 @@ struct KEY_PAIR
 class inplace_alter_handler_ctx : public Sql_alloc
 {
 public:
-  inplace_alter_handler_ctx() {}
+  inplace_alter_handler_ctx() = default;
 
-  virtual ~inplace_alter_handler_ctx() {}
+  virtual ~inplace_alter_handler_ctx() = default;
   virtual void set_shared_data(const inplace_alter_handler_ctx& ctx) {}
 };
 
@@ -2611,12 +2657,6 @@ typedef struct st_key_create_information
   uint flags;                                   /* HA_USE.. flags */
   LEX_CSTRING parser_name;
   LEX_CSTRING comment;
-  /**
-    A flag to determine if we will check for duplicate indexes.
-    This typically means that the key information was specified
-    directly by the user (set by the parser).
-  */
-  bool check_for_duplicate_indexes;
   bool is_ignored;
 } KEY_CREATE_INFO;
 
@@ -2638,8 +2678,8 @@ typedef struct st_key_create_information
 class TABLEOP_HOOKS
 {
 public:
-  TABLEOP_HOOKS() {}
-  virtual ~TABLEOP_HOOKS() {}
+  TABLEOP_HOOKS() = default;
+  virtual ~TABLEOP_HOOKS() = default;
 
   inline void prelock(TABLE **tables, uint count)
   {
@@ -2680,7 +2720,7 @@ typedef class Item COND;
 
 typedef struct st_ha_check_opt
 {
-  st_ha_check_opt() {}                        /* Remove gcc warning */
+  st_ha_check_opt() = default;                        /* Remove gcc warning */
   uint flags;       /* isam layer flags (e.g. for myisamchk) */
   uint sql_flags;   /* sql layer flags - for something myisamchk cannot do */
   time_t start_time;   /* When check/repair starts */
@@ -3059,8 +3099,8 @@ uint calculate_key_len(TABLE *, uint, const uchar *, key_part_map);
 class Handler_share
 {
 public:
-  Handler_share() {}
-  virtual ~Handler_share() {}
+  Handler_share() = default;
+  virtual ~Handler_share() = default;
 };
 
 enum class Compare_keys : uint32_t
@@ -3130,13 +3170,23 @@ protected:
 
   ha_rows estimation_rows_to_insert;
   handler *lookup_handler;
+  /* Statistics for the query. Updated if handler_stats.in_use is set */
+  ha_handler_stats active_handler_stats;
+  void set_handler_stats();
 public:
   handlerton *ht;                 /* storage engine of this handler */
   uchar *ref;				/* Pointer to current row */
   uchar *dup_ref;			/* Pointer to duplicate row */
   uchar *lookup_buffer;
 
+  /* General statistics for the table like number of row, file sizes etc */
   ha_statistics stats;
+  /*
+    Collect query stats here if pointer is != NULL.
+    This is a pointer because if we do a clone of the handler, we want to
+    use the original handler for collecting statistics.
+  */
+  ha_handler_stats *handler_stats;
 
   /** MultiRangeRead-related members: */
   range_seq_t mrr_iter;    /* Iterator to traverse the range sequence */
@@ -3330,8 +3380,8 @@ public:
     :table_share(share_arg), table(0),
     estimation_rows_to_insert(0),
     lookup_handler(this),
-    ht(ht_arg), ref(0), lookup_buffer(NULL), end_range(NULL),
-    implicit_emptied(0),
+    ht(ht_arg), ref(0), lookup_buffer(NULL), handler_stats(NULL),
+    end_range(NULL), implicit_emptied(0),
     mark_trx_read_write_done(0),
     check_table_binlog_row_based_done(0),
     check_table_binlog_row_based_result(0),
@@ -3478,6 +3528,7 @@ public:
   }
 
   int check_collation_compatibility();
+  int check_long_hash_compatibility() const;
   int ha_check_for_upgrade(HA_CHECK_OPT *check_opt);
   /** to be actually called to get 'check()' functionality*/
   int ha_check(THD *thd, HA_CHECK_OPT *check_opt);
@@ -3615,7 +3666,7 @@ public:
     - How things are tracked in trx and in add_changed_table().
     - If we can combine several statements under one commit in the binary log.
   */
-  bool has_transactions()
+  bool has_transactions() const
   {
     return ((ha_table_flags() & (HA_NO_TRANSACTIONS | HA_PERSISTENT_TABLE))
             == 0);
@@ -3626,16 +3677,25 @@ public:
     we don't have to write failed statements to the log as they can be
     rolled back.
   */
-  bool has_transactions_and_rollback()
+  bool has_transactions_and_rollback() const
   {
     return has_transactions() && has_rollback();
   }
   /*
     True if the underlaying table support transactions and rollback
   */
-  bool has_transaction_manager()
+  bool has_transaction_manager() const
   {
     return ((ha_table_flags() & HA_NO_TRANSACTIONS) == 0 && has_rollback());
+  }
+
+  /*
+    True if the underlaying table support TRANSACTIONAL table option
+  */
+  bool has_transactional_option() const
+  {
+    extern handlerton *maria_hton;
+    return partition_ht() == maria_hton || has_transaction_manager();
   }
 
   /*
@@ -3643,7 +3703,7 @@ public:
     can be killed fast.
   */
 
-  bool has_rollback()
+  bool has_rollback() const
   {
     return ((ht->flags & HTON_NO_ROLLBACK) == 0);
   }
@@ -4199,6 +4259,8 @@ public:
   */
   virtual uint lock_count(void) const { return 1; }
   /**
+    Get the lock(s) for the table and perform conversion of locks if needed.
+
     Is not invoked for non-transactional temporary tables.
 
     @note store_lock() can return more than one lock if the table is MERGE
@@ -4760,6 +4822,22 @@ public:
   {
     check_table_binlog_row_based_done= 0;
   }
+  virtual void handler_stats_updated() {}
+
+  inline void ha_handler_stats_reset()
+  {
+    handler_stats= &active_handler_stats;
+    active_handler_stats.reset();
+    active_handler_stats.active= 1;
+    handler_stats_updated();
+  }
+  inline void ha_handler_stats_disable()
+  {
+    handler_stats= 0;
+    active_handler_stats.active= 0;
+    handler_stats_updated();
+  }
+
 private:
   /* Cache result to avoid extra calls */
   inline void mark_trx_read_write()
@@ -5088,18 +5166,8 @@ public:
     These functions check for such possibility.
     Implementation could be based on Field_xxx::is_equal()
    */
-  virtual bool can_convert_string(const Field_string *field,
-                                  const Column_definition &new_type) const
-  {
-    return false;
-  }
-  virtual bool can_convert_varstring(const Field_varstring *field,
-                                     const Column_definition &new_type) const
-  {
-    return false;
-  }
-  virtual bool can_convert_blob(const Field_blob *field,
-                                const Column_definition &new_type) const
+  virtual bool can_convert_nocopy(const Field &,
+                                  const Column_definition &) const
   {
     return false;
   }
@@ -5124,7 +5192,8 @@ public:
     return (lower_case_table_names == 2 && !(ha_table_flags() & HA_FILE_BASED));
   }
 
-  void log_not_redoable_operation(const char *operation);
+  bool log_not_redoable_operation(const char *operation);
+
 protected:
   Handler_share *get_ha_share_ptr();
   void set_ha_share_ptr(Handler_share *arg_ha_share);
@@ -5229,7 +5298,7 @@ public:
                         const LEX_CSTRING *wild_arg);
   Discovered_table_list(THD *thd_arg, Dynamic_array<LEX_CSTRING*> *tables_arg)
     : thd(thd_arg), wild(NULL), with_temps(true), tables(tables_arg) {}
-  ~Discovered_table_list() {}
+  ~Discovered_table_list() = default;
 
   bool add_table(const char *tname, size_t tlen);
   bool add_file(const char *fname);

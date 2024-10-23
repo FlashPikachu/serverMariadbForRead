@@ -37,6 +37,7 @@ typedef struct st_json_string_t
   const uchar *c_str;    /* Current position in JSON string */
   const uchar *str_end;  /* The end on the string. */
   my_wc_t c_next;        /* UNICODE of the last read character */
+  int c_next_len;        /* character lenght of the last read character. */
   int error;             /* error code. */
 
   CHARSET_INFO *cs;      /* Character set of the JSON string. */
@@ -50,7 +51,7 @@ void json_string_set_cs(json_string_t *s, CHARSET_INFO *i_cs);
 void json_string_set_str(json_string_t *s,
                          const uchar *str, const uchar *end);
 #define json_next_char(j) \
-  (j)->wc((j)->cs, &(j)->c_next, (j)->c_str, (j)->str_end)
+  ((j)->c_next_len= (j)->wc((j)->cs, &(j)->c_next, (j)->c_str, (j)->str_end))
 #define json_eos(j) ((j)->c_str >= (j)->str_end)
 /*
   read_string_const_chr() reads the next character of the string constant
@@ -381,7 +382,7 @@ int json_find_paths_next(json_engine_t *je, json_find_paths_t *state);
 #define JSON_ERROR_ILLEGAL_SYMBOL (-2)
 
 /*
-  Converst JSON string constant into ordinary string constant
+  Convert JSON string constant into ordinary string constant
   which can involve unpacking json escapes and changing character set.
   Returns negative integer in the case of an error,
   the length of the result otherwise.

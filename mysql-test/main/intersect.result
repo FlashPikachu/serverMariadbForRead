@@ -124,6 +124,7 @@ ANALYZE
                   "r_rows": 3,
                   "r_table_time_ms": "REPLACED",
                   "r_other_time_ms": "REPLACED",
+                  "r_engine_stats": REPLACED,
                   "filtered": 100,
                   "r_filtered": 100
                 }
@@ -147,6 +148,7 @@ ANALYZE
                   "r_rows": 3,
                   "r_table_time_ms": "REPLACED",
                   "r_other_time_ms": "REPLACED",
+                  "r_engine_stats": REPLACED,
                   "filtered": 100,
                   "r_filtered": 100
                 }
@@ -170,6 +172,7 @@ ANALYZE
                   "r_rows": 3,
                   "r_table_time_ms": "REPLACED",
                   "r_other_time_ms": "REPLACED",
+                  "r_engine_stats": REPLACED,
                   "filtered": 100,
                   "r_filtered": 100
                 }
@@ -223,6 +226,7 @@ ANALYZE
                             "r_rows": 3,
                             "r_table_time_ms": "REPLACED",
                             "r_other_time_ms": "REPLACED",
+                            "r_engine_stats": REPLACED,
                             "filtered": 100,
                             "r_filtered": 100
                           }
@@ -246,6 +250,7 @@ ANALYZE
                             "r_rows": 3,
                             "r_table_time_ms": "REPLACED",
                             "r_other_time_ms": "REPLACED",
+                            "r_engine_stats": REPLACED,
                             "filtered": 100,
                             "r_filtered": 100
                           }
@@ -269,6 +274,7 @@ ANALYZE
                             "r_rows": 3,
                             "r_table_time_ms": "REPLACED",
                             "r_other_time_ms": "REPLACED",
+                            "r_engine_stats": REPLACED,
                             "filtered": 100,
                             "r_filtered": 100
                           }
@@ -410,6 +416,7 @@ ANALYZE
                   "r_rows": 3,
                   "r_table_time_ms": "REPLACED",
                   "r_other_time_ms": "REPLACED",
+                  "r_engine_stats": REPLACED,
                   "filtered": 100,
                   "r_filtered": 100
                 }
@@ -433,6 +440,7 @@ ANALYZE
                   "r_rows": 3,
                   "r_table_time_ms": "REPLACED",
                   "r_other_time_ms": "REPLACED",
+                  "r_engine_stats": REPLACED,
                   "filtered": 100,
                   "r_filtered": 100
                 }
@@ -447,13 +455,18 @@ ANALYZE
                     "r_rows": 3,
                     "r_table_time_ms": "REPLACED",
                     "r_other_time_ms": "REPLACED",
+                    "r_engine_stats": REPLACED,
                     "filtered": 100,
                     "r_filtered": 100
                   },
                   "buffer_type": "flat",
                   "buffer_size": "256Kb",
                   "join_type": "BNL",
-                  "r_filtered": 100
+                  "r_loops": 3,
+                  "r_filtered": 100,
+                  "r_unpack_time_ms": "REPLACED",
+                  "r_other_time_ms": "REPLACED",
+                  "r_effective_rows": 3
                 }
               }
             ]
@@ -505,6 +518,7 @@ ANALYZE
                             "r_rows": 3,
                             "r_table_time_ms": "REPLACED",
                             "r_other_time_ms": "REPLACED",
+                            "r_engine_stats": REPLACED,
                             "filtered": 100,
                             "r_filtered": 100
                           }
@@ -528,6 +542,7 @@ ANALYZE
                             "r_rows": 3,
                             "r_table_time_ms": "REPLACED",
                             "r_other_time_ms": "REPLACED",
+                            "r_engine_stats": REPLACED,
                             "filtered": 100,
                             "r_filtered": 100
                           }
@@ -542,13 +557,18 @@ ANALYZE
                               "r_rows": 3,
                               "r_table_time_ms": "REPLACED",
                               "r_other_time_ms": "REPLACED",
+                              "r_engine_stats": REPLACED,
                               "filtered": 100,
                               "r_filtered": 100
                             },
                             "buffer_type": "flat",
                             "buffer_size": "256Kb",
                             "join_type": "BNL",
-                            "r_filtered": 100
+                            "r_loops": 3,
+                            "r_filtered": 100,
+                            "r_unpack_time_ms": "REPLACED",
+                            "r_other_time_ms": "REPLACED",
+                            "r_effective_rows": 3
                           }
                         }
                       ]
@@ -636,7 +656,7 @@ Table	Create Table
 t4	CREATE TABLE `t4` (
   `a` int(11) DEFAULT NULL,
   `b` blob DEFAULT NULL
-) ENGINE=MyISAM DEFAULT CHARSET=latin1
+) ENGINE=MyISAM DEFAULT CHARSET=latin1 COLLATE=latin1_swedish_ci
 drop tables t1,t2,t3,t4;
 create table t1 (a int, b blob) engine=MyISAM;
 create table t2 (c int, d blob) engine=MyISAM;
@@ -776,7 +796,7 @@ a	b
 drop procedure p1;
 show create view v1;
 View	Create View	character_set_client	collation_connection
-v1	CREATE ALGORITHM=UNDEFINED DEFINER=`root`@`localhost` SQL SECURITY DEFINER VIEW `v1` AS (select `test`.`t1`.`a` AS `a`,`test`.`t1`.`b` AS `b` from `test`.`t1`) union select `__6`.`c` AS `c`,`__6`.`d` AS `d` from ((select `test`.`t2`.`c` AS `c`,`test`.`t2`.`d` AS `d` from `test`.`t2`) intersect (select `test`.`t3`.`e` AS `e`,`test`.`t3`.`f` AS `f` from `test`.`t3`)) `__6` union (select 4 AS `4`,4 AS `4`)	latin1	latin1_swedish_ci
+v1	CREATE ALGORITHM=UNDEFINED DEFINER=`root`@`localhost` SQL SECURITY DEFINER VIEW `v1` AS (select `t1`.`a` AS `a`,`t1`.`b` AS `b` from `t1`) union select `__6`.`c` AS `c`,`__6`.`d` AS `d` from ((select `t2`.`c` AS `c`,`t2`.`d` AS `d` from `t2`) intersect (select `t3`.`e` AS `e`,`t3`.`f` AS `f` from `t3`)) `__6` union (select 4 AS `4`,4 AS `4`)	latin1	latin1_swedish_ci
 drop view v1;
 drop tables t1,t2,t3;
 #

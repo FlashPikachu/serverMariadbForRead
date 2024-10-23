@@ -40,6 +40,7 @@
 #include <mysql/plugin_data_type.h>
 #include <mysql/plugin_function.h>
 #include "sql_plugin_compat.h"
+#include "wsrep_mysqld.h"
 
 static PSI_memory_key key_memory_plugin_mem_root;
 static PSI_memory_key key_memory_plugin_int_mem_root;
@@ -341,7 +342,7 @@ static bool register_builtin(struct st_maria_plugin *, struct st_plugin_int *,
                              struct st_plugin_int **);
 static void unlock_variables(THD *thd, struct system_variables *vars);
 static void cleanup_variables(struct system_variables *vars);
-static void plugin_vars_free_values(sys_var *vars);
+static void plugin_vars_free_values(st_mysql_sys_var **vars);
 static void restore_ptr_backup(uint n, st_ptr_backup *backup);
 static void intern_plugin_unlock(LEX *lex, plugin_ref plugin);
 static void reap_plugins(void);
@@ -374,7 +375,8 @@ bool check_valid_path(const char *path, size_t len)
 static void fix_dl_name(MEM_ROOT *root, LEX_CSTRING *dl)
 {
   const size_t so_ext_len= sizeof(SO_EXT) - 1;
-  if (my_strcasecmp(&my_charset_latin1, dl->str + dl->length - so_ext_len,
+  if (dl->length < so_ext_len ||
+      my_strcasecmp(&my_charset_latin1, dl->str + dl->length - so_ext_len,
                     SO_EXT))
   {
     char *s= (char*)alloc_root(root, dl->length + so_ext_len + 1);
@@ -1291,7 +1293,7 @@ static void plugin_del(struct st_plugin_int *plugin, uint del_mask)
   if (!(plugin->state & del_mask))
     DBUG_VOID_RETURN;
   /* Free allocated strings before deleting the plugin. */
-  plugin_vars_free_values(plugin->system_vars);
+  plugin_vars_free_values(plugin->plugin->system_vars);
   restore_ptr_backup(plugin->nbackups, plugin->ptr_backup);
   if (plugin->plugin_dl)
   {
@@ -1433,6 +1435,50 @@ void plugin_unlock_list(THD *thd, plugin_ref *list, size_t count)
   DBUG_VOID_RETURN;
 }
 
+static void print_init_failed_error(st_plugin_int *p)
+{
+  sql_print_error("Plugin '%s' registration as a %s failed.",
+                  p->name.str,
+                  plugin_type_names[p->plugin->type].str);
+}
+
+static int plugin_do_initialize(struct st_plugin_int *plugin, uint &state)
+{
+  DBUG_ENTER("plugin_do_initialize");
+  mysql_mutex_assert_not_owner(&LOCK_plugin);
+  plugin_type_init init= plugin_type_initialize[plugin->plugin->type];
+  if (!init)
+    init= (plugin_type_init) plugin->plugin->init;
+  if (init)
+    if (int ret= init(plugin))
+    {
+      /* Plugin init failed and did not requested a retry */
+      if (ret != HA_ERR_RETRY_INIT)
+        print_init_failed_error(plugin);
+      DBUG_RETURN(ret);
+    }
+  state= PLUGIN_IS_READY; // plugin->init() succeeded
+
+  if (plugin->plugin->status_vars)
+  {
+    /*
+      historical ndb behavior caused MySQL plugins to specify
+      status var names in full, with the plugin name prefix.
+      this was never fixed in MySQL.
+      MariaDB fixes that but supports MySQL style too.
+    */
+    SHOW_VAR *show_vars= plugin->plugin->status_vars;
+    SHOW_VAR tmp_array[2]= {{plugin->plugin->name,
+                             (char *) plugin->plugin->status_vars, SHOW_ARRAY},
+                            {0, 0, SHOW_UNDEF}};
+    if (strncasecmp(show_vars->name, plugin->name.str, plugin->name.length))
+      show_vars= tmp_array;
+
+    if (add_status_vars(show_vars))
+      DBUG_RETURN(1);
+  }
+  DBUG_RETURN(0);
+}
 
 static int plugin_initialize(MEM_ROOT *tmp_root, struct st_plugin_int *plugin,
                              int *argc, char **argv, bool options_only)
@@ -1455,52 +1501,10 @@ static int plugin_initialize(MEM_ROOT *tmp_root, struct st_plugin_int *plugin,
   {
     ret= !options_only && plugin_is_forced(plugin);
     state= PLUGIN_IS_DISABLED;
-    goto err;
   }
+  else
+    ret= plugin_do_initialize(plugin, state);
 
-  if (plugin_type_initialize[plugin->plugin->type])
-  {
-    if ((*plugin_type_initialize[plugin->plugin->type])(plugin))
-    {
-      sql_print_error("Plugin '%s' registration as a %s failed.",
-                      plugin->name.str, plugin_type_names[plugin->plugin->type].str);
-      goto err;
-    }
-  }
-  else if (plugin->plugin->init)
-  {
-    if (plugin->plugin->init(plugin))
-    {
-      sql_print_error("Plugin '%s' init function returned error.",
-                      plugin->name.str);
-      goto err;
-    }
-  }
-  state= PLUGIN_IS_READY; // plugin->init() succeeded
-
-  if (plugin->plugin->status_vars)
-  {
-    /*
-      historical ndb behavior caused MySQL plugins to specify
-      status var names in full, with the plugin name prefix.
-      this was never fixed in MySQL.
-      MariaDB fixes that but supports MySQL style too.
-    */
-    SHOW_VAR *show_vars= plugin->plugin->status_vars;
-    SHOW_VAR tmp_array[2]= {
-      {plugin->plugin->name, (char*)plugin->plugin->status_vars, SHOW_ARRAY},
-      {0, 0, SHOW_UNDEF}
-    };
-    if (strncasecmp(show_vars->name, plugin->name.str, plugin->name.length))
-      show_vars= tmp_array;
-
-    if (add_status_vars(show_vars))
-      goto err;
-  }
-
-  ret= 0;
-
-err:
   if (ret)
     plugin_variables_deinit(plugin);
 
@@ -1593,7 +1597,7 @@ int plugin_init(int *argc, char **argv, int flags)
   size_t i;
   struct st_maria_plugin **builtins;
   struct st_maria_plugin *plugin;
-  struct st_plugin_int tmp, *plugin_ptr, **reap;
+  struct st_plugin_int tmp, *plugin_ptr, **reap, **retry_end, **retry_start;
   MEM_ROOT tmp_root;
   bool reaped_mandatory_plugin= false;
   bool mandatory= true;
@@ -1735,11 +1739,16 @@ int plugin_init(int *argc, char **argv, int flags)
   */
 
   mysql_mutex_lock(&LOCK_plugin);
+  /* List of plugins to reap */
   reap= (st_plugin_int **) my_alloca((plugin_array.elements+1) * sizeof(void*));
   *(reap++)= NULL;
+  /* List of plugins to retry */
+  retry_start= retry_end=
+    (st_plugin_int **) my_alloca((plugin_array.elements+1) * sizeof(void*));
 
   for(;;)
   {
+    int error;
     for (i=0; i < MYSQL_MAX_PLUGIN_TYPE_NUM; i++)
     {
       HASH *hash= plugin_hash + plugin_type_initialization_order[i];
@@ -1753,13 +1762,50 @@ int plugin_init(int *argc, char **argv, int flags)
           bool opts_only= flags & PLUGIN_INIT_SKIP_INITIALIZATION &&
                          (flags & PLUGIN_INIT_SKIP_PLUGIN_TABLE ||
                           !plugin_table_engine);
-          if (plugin_initialize(&tmp_root, plugin_ptr, argc, argv, opts_only))
+          error= plugin_initialize(&tmp_root, plugin_ptr, argc, argv,
+                                   opts_only);
+          if (error)
           {
             plugin_ptr->state= PLUGIN_IS_DYING;
-            *(reap++)= plugin_ptr;
+            /* The plugin wants a retry of the initialisation,
+               possibly due to dependency on other plugins */
+            if (unlikely(error == HA_ERR_RETRY_INIT))
+              *(retry_end++)= plugin_ptr;
+            else
+              *(reap++)= plugin_ptr;
           }
         }
       }
+    }
+    /* Retry plugins that asked for it */
+    while (retry_start < retry_end)
+    {
+      st_plugin_int **to_re_retry, **retrying;
+      for (to_re_retry= retrying= retry_start; retrying < retry_end; retrying++)
+      {
+        plugin_ptr= *retrying;
+        uint state= plugin_ptr->state;
+        mysql_mutex_unlock(&LOCK_plugin);
+        error= plugin_do_initialize(plugin_ptr, state);
+        mysql_mutex_lock(&LOCK_plugin);
+        plugin_ptr->state= state;
+        if (error == HA_ERR_RETRY_INIT)
+          *(to_re_retry++)= plugin_ptr;
+        else if (error)
+          *(reap++)= plugin_ptr;
+      }
+      /* If the retry list has not changed, i.e. if all retry attempts
+      result in another retry request, empty the retry list */
+      if (to_re_retry == retry_end)
+        while (to_re_retry > retry_start)
+        {
+          plugin_ptr= *(--to_re_retry);
+          *(reap++)= plugin_ptr;
+          /** `plugin_do_initialize()' did not print any error in this
+          case, so we do it here. */
+          print_init_failed_error(plugin_ptr);
+        }
+      retry_end= to_re_retry;
     }
 
     /* load and init plugins from the plugin table (unless done already) */
@@ -1786,6 +1832,7 @@ int plugin_init(int *argc, char **argv, int flags)
   }
 
   mysql_mutex_unlock(&LOCK_plugin);
+  my_afree(retry_start);
   my_afree(reap);
   if (reaped_mandatory_plugin && !opt_help)
     goto err;
@@ -2531,7 +2578,7 @@ static bool plugin_dl_foreach_internal(THD *thd, st_plugin_dl *plugin_dl,
     tmp.plugin_dl= plugin_dl;
 
     mysql_mutex_lock(&LOCK_plugin);
-    if ((plugin= plugin_find_internal(&tmp.name, MYSQL_ANY_PLUGIN)) &&
+    if ((plugin= plugin_find_internal(&tmp.name, plug->type)) &&
         plugin->plugin == plug)
 
     {
@@ -2943,6 +2990,7 @@ sys_var *find_sys_var(THD *thd, const char *str, size_t length,
 /*
   called by register_var, construct_options and test_plugin_options.
   Returns the 'bookmark' for the named variable.
+  returns null for non thd-local variables.
   LOCK_system_variables_hash should be at least read locked
 */
 static st_bookmark *find_bookmark(const char *plugin, const char *name,
@@ -2999,7 +3047,6 @@ static size_t var_storage_size(int flags)
 
 /*
   returns a bookmark for thd-local variables, creating if neccessary.
-  returns null for non thd-local variables.
   Requires that a write lock is obtained on LOCK_system_variables_hash
 */
 static st_bookmark *register_var(const char *plugin, const char *name,
@@ -3353,27 +3400,35 @@ void plugin_thdvar_cleanup(THD *thd)
   variables are no longer accessible and the value space is lost. Note
   that only string values with PLUGIN_VAR_MEMALLOC are allocated and
   must be freed.
-
-  @param[in]        vars        Chain of system variables of a plugin
 */
 
-static void plugin_vars_free_values(sys_var *vars)
+static void plugin_vars_free_values(st_mysql_sys_var **vars)
 {
   DBUG_ENTER("plugin_vars_free_values");
 
-  for (sys_var *var= vars; var; var= var->next)
+  if (!vars)
+    DBUG_VOID_RETURN;
+
+  while(st_mysql_sys_var *var= *vars++)
   {
-    sys_var_pluginvar *piv= var->cast_pluginvar();
-    if (piv &&
-        ((piv->plugin_var->flags & PLUGIN_VAR_TYPEMASK) == PLUGIN_VAR_STR) &&
-        (piv->plugin_var->flags & PLUGIN_VAR_MEMALLOC))
+    if ((var->flags & PLUGIN_VAR_TYPEMASK) == PLUGIN_VAR_STR &&
+         var->flags & PLUGIN_VAR_MEMALLOC)
     {
-      /* Free the string from global_system_variables. */
-      char **valptr= (char**) piv->real_value_ptr(NULL, OPT_GLOBAL);
+      char **val;
+      if (var->flags & PLUGIN_VAR_THDLOCAL)
+      {
+        st_bookmark *v= find_bookmark(0, var->name, var->flags);
+        if (!v)
+          continue;
+        val= (char**)(global_system_variables.dynamic_variables_ptr + v->offset);
+      }
+      else
+        val= *(char***) (var + 1);
+
       DBUG_PRINT("plugin", ("freeing value for: '%s'  addr: %p",
-                            var->name.str, valptr));
-      my_free(*valptr);
-      *valptr= NULL;
+                            var->name, val));
+      my_free(*val);
+      *val= NULL;
     }
   }
   DBUG_VOID_RETURN;
@@ -4033,7 +4088,7 @@ static my_option *construct_help_options(MEM_ROOT *mem_root,
   bzero(opts, sizeof(my_option) * count);
 
   /**
-    some plugin variables (those that don't have PLUGIN_VAR_NOSYSVAR flag)
+    some plugin variables
     have their names prefixed with the plugin name. Restore the names here
     to get the correct (not double-prefixed) help text.
     We won't need @@sysvars anymore and don't care about their proper names.
@@ -4145,9 +4200,6 @@ static int test_plugin_options(MEM_ROOT *tmp_root, struct st_plugin_int *tmp,
         char *varname;
         sys_var *v;
 
-        if (o->flags & PLUGIN_VAR_NOSYSVAR)
-          continue;
-
         tmp_backup[tmp->nbackups++].save(&o->name);
         if ((var= find_bookmark(tmp->name.str, o->name, o->flags)))
         {
@@ -4163,6 +4215,12 @@ static int test_plugin_options(MEM_ROOT *tmp_root, struct st_plugin_int *tmp,
           my_casedn_str(&my_charset_latin1, varname);
           convert_dash_to_underscore(varname, len-1);
         }
+        if (o->flags & PLUGIN_VAR_NOSYSVAR)
+        {
+          o->name= varname;
+          continue;
+        }
+
         const char *s= o->flags & PLUGIN_VAR_DEPRECATED ? "" : NULL;
         v= new (mem_root) sys_var_pluginvar(&chain, varname, tmp, o, s);
         v->test_load= (var ? &var->loaded : &static_unload);

@@ -1,7 +1,7 @@
 #ifndef ITEM_CMPFUNC_INCLUDED
 #define ITEM_CMPFUNC_INCLUDED
 /* Copyright (c) 2000, 2015, Oracle and/or its affiliates.
-   Copyright (c) 2009, 2020, MariaDB
+   Copyright (c) 2009, 2022, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -252,8 +252,7 @@ protected:
     Item_bool_func(thd, a), value(a_value), affirmative(a_affirmative)
   {}
 
-  ~Item_func_truth()
-  {}
+  ~Item_func_truth() = default;
 private:
   /**
     True for <code>X IS [NOT] TRUE</code>,
@@ -275,7 +274,7 @@ class Item_func_istrue : public Item_func_truth
 {
 public:
   Item_func_istrue(THD *thd, Item *a): Item_func_truth(thd, a, true, true) {}
-  ~Item_func_istrue() {}
+  ~Item_func_istrue() = default;
   LEX_CSTRING func_name_cstring() const override
   {
     static LEX_CSTRING name= {STRING_WITH_LEN("istrue") };
@@ -295,7 +294,7 @@ class Item_func_isnottrue : public Item_func_truth
 public:
   Item_func_isnottrue(THD *thd, Item *a):
     Item_func_truth(thd, a, true, false) {}
-  ~Item_func_isnottrue() {}
+  ~Item_func_isnottrue() = default;
   LEX_CSTRING func_name_cstring() const override
   {
     static LEX_CSTRING name= {STRING_WITH_LEN("isnottrue") };
@@ -317,7 +316,7 @@ class Item_func_isfalse : public Item_func_truth
 {
 public:
   Item_func_isfalse(THD *thd, Item *a): Item_func_truth(thd, a, false, true) {}
-  ~Item_func_isfalse() {}
+  ~Item_func_isfalse() = default;
   LEX_CSTRING func_name_cstring() const override
   {
     static LEX_CSTRING name= {STRING_WITH_LEN("isfalse") };
@@ -337,7 +336,7 @@ class Item_func_isnotfalse : public Item_func_truth
 public:
   Item_func_isnotfalse(THD *thd, Item *a):
     Item_func_truth(thd, a, false, false) {}
-  ~Item_func_isnotfalse() {}
+  ~Item_func_isnotfalse() = default;
   LEX_CSTRING func_name_cstring() const override
   {
     static LEX_CSTRING name= {STRING_WITH_LEN("isnotfalse") };
@@ -375,8 +374,7 @@ class Item_in_optimizer: public Item_bool_func
 protected:
   Item_cache *cache;
   Item *expr_cache;
-  bool save_cache;
-  /* 
+  /*
     Stores the value of "NULL IN (SELECT ...)" for uncorrelated subqueries:
       UNKNOWN - "NULL in (SELECT ...)" has not yet been evaluated
       FALSE   - result is FALSE
@@ -386,7 +384,7 @@ protected:
 public:
   Item_in_optimizer(THD *thd, Item *a, Item *b):
     Item_bool_func(thd, a, b), cache(0), expr_cache(0),
-    save_cache(0), result_for_null_param(UNKNOWN)
+    result_for_null_param(UNKNOWN)
   {
     with_flags|= item_with_t::SUBQUERY;
   }
@@ -403,7 +401,6 @@ public:
     return name;
   }
   Item_cache **get_cache() { return &cache; }
-  void keep_top_level_cache();
   Item *transform(THD *thd, Item_transformer transformer, uchar *arg) override;
   Item *expr_cache_insert_transformer(THD *thd, uchar *unused) override;
   bool is_expensive_processor(void *arg) override;
@@ -721,6 +718,8 @@ public:
     static LEX_CSTRING name= {STRING_WITH_LEN("<not>") };
     return name;
   }
+  enum precedence precedence() const override
+  { return show ? Item_func::precedence() : args[0]->precedence(); }
   bool fix_fields(THD *thd, Item **ref) override
   { return Item_func::fix_fields(thd, ref);}
   void print(String *str, enum_query_type query_type) override;
@@ -1448,14 +1447,21 @@ public:
   CHARSET_INFO *collation;
   uint count;
   uint used_count;
-  in_vector() {}
+  in_vector() = default;
   in_vector(THD *thd, uint elements, uint element_length, qsort2_cmp cmp_func,
   	    CHARSET_INFO *cmp_coll)
     :base((char*) thd_calloc(thd, elements * element_length)),
      size(element_length), compare(cmp_func), collation(cmp_coll),
      count(elements), used_count(elements) {}
-  virtual ~in_vector() {}
-  virtual void set(uint pos,Item *item)=0;
+  virtual ~in_vector() = default;
+  /*
+    Store an Item value at the given position.
+    @returns false - the Item was not NULL, and the conversion from the
+                     Item data type to the cmp_item data type went without
+                     errors
+    @returns true  - the Item was NULL, or data type conversion returned NULL
+  */
+  virtual bool set(uint pos, Item *item)=0;
   virtual uchar *get_value(Item *item)=0;
   void sort()
   {
@@ -1510,7 +1516,7 @@ class in_string :public in_vector
 public:
   in_string(THD *thd, uint elements, qsort2_cmp cmp_func, CHARSET_INFO *cs);
   ~in_string();
-  void set(uint pos,Item *item) override;
+  bool set(uint pos, Item *item) override;
   uchar *get_value(Item *item) override;
   Item* create_item(THD *thd) override;
   void value_to_item(uint pos, Item *item) override
@@ -1538,7 +1544,7 @@ protected:
   } tmp;
 public:
   in_longlong(THD *thd, uint elements);
-  void set(uint pos,Item *item) override;
+  bool set(uint pos, Item *item) override;
   uchar *get_value(Item *item) override;
   Item* create_item(THD *thd) override;
   void value_to_item(uint pos, Item *item) override
@@ -1559,11 +1565,11 @@ class in_timestamp :public in_vector
   Timestamp_or_zero_datetime tmp;
 public:
   in_timestamp(THD *thd, uint elements);
-  void set(uint pos,Item *item) override;
+  bool set(uint pos, Item *item) override;
   uchar *get_value(Item *item) override;
   Item* create_item(THD *thd) override;
   void value_to_item(uint pos, Item *item) override;
-  const Type_handler *type_handler() const override
+  const Type_handler *type_handler() const  override
   { return &type_handler_timestamp2; }
 };
 
@@ -1595,7 +1601,7 @@ public:
   in_datetime(THD *thd, uint elements)
    :in_temporal(thd, elements)
   {}
-  void set(uint pos,Item *item) override;
+  bool set(uint pos, Item *item) override;
   uchar *get_value(Item *item) override;
   const Type_handler *type_handler() const override
   { return &type_handler_datetime2; }
@@ -1608,7 +1614,7 @@ public:
   in_time(THD *thd, uint elements)
    :in_temporal(thd, elements)
   {}
-  void set(uint pos,Item *item) override;
+  bool set(uint pos, Item *item) override;
   uchar *get_value(Item *item) override;
   const Type_handler *type_handler() const override
   { return &type_handler_time2; }
@@ -1620,7 +1626,7 @@ class in_double :public in_vector
   double tmp;
 public:
   in_double(THD *thd, uint elements);
-  void set(uint pos,Item *item) override;
+  bool set(uint pos, Item *item) override;
   uchar *get_value(Item *item) override;
   Item *create_item(THD *thd) override;
   void value_to_item(uint pos, Item *item) override
@@ -1637,7 +1643,7 @@ class in_decimal :public in_vector
   my_decimal val;
 public:
   in_decimal(THD *thd, uint elements);
-  void set(uint pos, Item *item) override;
+  bool set(uint pos, Item *item) override;
   uchar *get_value(Item *item) override;
   Item *create_item(THD *thd) override;
   void value_to_item(uint pos, Item *item) override
@@ -1660,7 +1666,7 @@ class cmp_item :public Sql_alloc
 public:
   CHARSET_INFO *cmp_charset;
   cmp_item() { cmp_charset= &my_charset_bin; }
-  virtual ~cmp_item() {}
+  virtual ~cmp_item() = default;
   virtual void store_value(Item *item)= 0;
   /**
      @returns result (TRUE, FALSE or UNKNOWN) of
@@ -1671,10 +1677,14 @@ public:
   // for optimized IN with row
   virtual int compare(cmp_item *item)= 0;
   virtual cmp_item *make_same(THD *thd)= 0;
-  virtual void store_value_by_template(THD *thd, cmp_item *tmpl, Item *item)
-  {
-    store_value(item);
-  }
+  /*
+    Store a scalar or a ROW value into "this".
+    @returns false - the value (or every component in case of ROW) was
+                     not NULL and the data type conversion went without errors.
+    @returns true  - the value (or some of its components) was NULL, or the
+                     data type conversion of a not-NULL value returned NULL.
+  */
+  virtual bool store_value_by_template(THD *thd, cmp_item *tmpl, Item *item)=0;
 };
 
 /// cmp_item which stores a scalar (i.e. non-ROW).
@@ -1682,6 +1692,11 @@ class cmp_item_scalar : public cmp_item
 {
 protected:
   bool m_null_value;                            ///< If stored value is NULL
+  bool store_value_by_template(THD *thd, cmp_item *tmpl, Item *item) override
+  {
+    store_value(item);
+    return m_null_value;
+  }
 };
 
 class cmp_item_string : public cmp_item_scalar
@@ -1689,7 +1704,7 @@ class cmp_item_string : public cmp_item_scalar
 protected:
   String *value_res;
 public:
-  cmp_item_string () {}
+  cmp_item_string () = default;
   cmp_item_string (CHARSET_INFO *cs) { cmp_charset= cs; }
   void set_charset(CHARSET_INFO *cs) { cmp_charset= cs; }
   friend class cmp_item_sort_string;
@@ -1755,7 +1770,7 @@ class cmp_item_int : public cmp_item_scalar
 {
   longlong value;
 public:
-  cmp_item_int() {}                           /* Remove gcc warning */
+  cmp_item_int() = default;                           /* Remove gcc warning */
   void store_value(Item *item)
   {
     value= item->val_int();
@@ -1788,7 +1803,7 @@ class cmp_item_temporal: public cmp_item_scalar
 protected:
   longlong value;
 public:
-  cmp_item_temporal() {}
+  cmp_item_temporal() = default;
   int compare(cmp_item *ci);
 };
 
@@ -1844,7 +1859,7 @@ class cmp_item_real : public cmp_item_scalar
 {
   double value;
 public:
-  cmp_item_real() {}                          /* Remove gcc warning */
+  cmp_item_real() = default;                          /* Remove gcc warning */
   void store_value(Item *item)
   {
     value= item->val_real();
@@ -1874,7 +1889,7 @@ class cmp_item_decimal : public cmp_item_scalar
 {
   my_decimal value;
 public:
-  cmp_item_decimal() {}                       /* Remove gcc warning */
+  cmp_item_decimal() = default;                       /* Remove gcc warning */
   void store_value(Item *item);
   int cmp(Item *arg);
   int cmp_not_null(const Value *val);
@@ -2620,6 +2635,7 @@ public:
   bool to_be_transformed_into_in_subq(THD *thd);
   bool create_value_list_for_tvc(THD *thd, List< List<Item> > *values);
   Item *in_predicate_to_in_subs_transformer(THD *thd, uchar *arg) override;
+  Item *in_predicate_to_equality_transformer(THD *thd, uchar *arg) override;
   uint32 max_length_of_left_expr();
 };
 
@@ -2637,18 +2653,18 @@ class cmp_item_row :public cmp_item
 public:
   cmp_item_row(): comparators(0), n(0) {}
   ~cmp_item_row();
-  void store_value(Item *item);
+  void store_value(Item *item) override;
   bool prepare_comparators(THD *, const LEX_CSTRING &funcname,
                            const Item_args *args, uint level);
-  int cmp(Item *arg);
-  int cmp_not_null(const Value *val)
+  int cmp(Item *arg) override;
+  int cmp_not_null(const Value *val) override
   {
     DBUG_ASSERT(false);
     return TRUE;
   }
-  int compare(cmp_item *arg);
-  cmp_item *make_same(THD *thd);
-  void store_value_by_template(THD *thd, cmp_item *tmpl, Item *);
+  int compare(cmp_item *arg) override;
+  cmp_item *make_same(THD *thd) override;
+  bool store_value_by_template(THD *thd, cmp_item *tmpl, Item *) override;
   friend class Item_func_in;
   cmp_item *get_comparator(uint i) { return comparators[i]; }
 };
@@ -2660,7 +2676,7 @@ class in_row :public in_vector
 public:
   in_row(THD *thd, uint elements, Item *);
   ~in_row();
-  void set(uint pos,Item *item) override;
+  bool set(uint pos, Item *item) override;
   uchar *get_value(Item *item) override;
   friend class Item_func_in;
   const Type_handler *type_handler() const override { return &type_handler_row; }
@@ -3178,17 +3194,40 @@ public:
                          COND **conds);
   void copy_andor_arguments(THD *thd, Item_cond *item);
   bool walk(Item_processor processor, bool walk_subquery, void *arg) override;
-  Item *transform(THD *thd, Item_transformer transformer, uchar *arg) override;
+  Item *do_transform(THD *thd, Item_transformer transformer, uchar *arg,
+                     bool toplevel);
+  Item *transform(THD *thd, Item_transformer transformer, uchar *arg) override
+  {
+    return do_transform(thd, transformer, arg, 0);
+  }
+  Item *top_level_transform(THD *thd, Item_transformer transformer, uchar *arg)
+    override
+  {
+    return do_transform(thd, transformer, arg, 1);
+  }
   void traverse_cond(Cond_traverser, void *arg, traverse_order order) override;
   void neg_arguments(THD *thd);
   Item* propagate_equal_fields(THD *, const Context &, COND_EQUAL *) override;
+  Item *do_compile(THD *thd, Item_analyzer analyzer, uchar **arg_p,
+                   Item_transformer transformer, uchar *arg_t, bool toplevel);
   Item *compile(THD *thd, Item_analyzer analyzer, uchar **arg_p,
-                Item_transformer transformer, uchar *arg_t) override;
+                Item_transformer transformer, uchar *arg_t) override
+  {
+    return do_compile(thd, analyzer, arg_p, transformer, arg_t, 0);
+  }
+  Item* top_level_compile(THD *thd, Item_analyzer analyzer, uchar **arg_p,
+                          Item_transformer transformer, uchar *arg_t) override
+  {
+    return do_compile(thd, analyzer, arg_p, transformer, arg_t, 1);
+  }
   bool eval_not_null_tables(void *opt_arg) override;
   bool find_not_null_fields(table_map allowed) override;
   Item *build_clone(THD *thd) override;
   bool excl_dep_on_table(table_map tab_map) override;
   bool excl_dep_on_grouping_fields(st_select_lex *sel) override;
+
+private:
+  void merge_sub_condition(List_iterator<Item>& li);
 };
 
 template <template<class> class LI, class T> class Item_equal_iterator;
@@ -3450,7 +3489,7 @@ protected:
   Item_equal *item_equal;
   Item *curr_item;
 public:
-  Item_equal_iterator<LI,T>(Item_equal &item_eq) 
+  Item_equal_iterator(Item_equal &item_eq)
     :LI<T> (item_eq.equal_items)
   {
     curr_item= NULL;
@@ -3692,8 +3731,8 @@ Item *and_expressions(Item *a, Item *b, Item **org_item);
 class Comp_creator
 {
 public:
-  Comp_creator() {}                           /* Remove gcc warning */
-  virtual ~Comp_creator() {}                  /* Remove gcc warning */
+  Comp_creator() = default;                           /* Remove gcc warning */
+  virtual ~Comp_creator() = default;                  /* Remove gcc warning */
   /**
     Create operation with given arguments.
   */
@@ -3712,8 +3751,8 @@ public:
 class Eq_creator :public Comp_creator
 {
 public:
-  Eq_creator() {}                             /* Remove gcc warning */
-  virtual ~Eq_creator() {}                    /* Remove gcc warning */
+  Eq_creator() = default;                             /* Remove gcc warning */
+  virtual ~Eq_creator() = default;                    /* Remove gcc warning */
   Item_bool_rowready_func2* create(THD *thd, Item *a, Item *b) const;
   Item_bool_rowready_func2* create_swap(THD *thd, Item *a, Item *b) const;
   const char* symbol(bool invert) const { return invert? "<>" : "="; }
@@ -3724,8 +3763,8 @@ public:
 class Ne_creator :public Comp_creator
 {
 public:
-  Ne_creator() {}                             /* Remove gcc warning */
-  virtual ~Ne_creator() {}                    /* Remove gcc warning */
+  Ne_creator() = default;                             /* Remove gcc warning */
+  virtual ~Ne_creator() = default;                    /* Remove gcc warning */
   Item_bool_rowready_func2* create(THD *thd, Item *a, Item *b) const;
   Item_bool_rowready_func2* create_swap(THD *thd, Item *a, Item *b) const;
   const char* symbol(bool invert) const { return invert? "=" : "<>"; }
@@ -3736,8 +3775,8 @@ public:
 class Gt_creator :public Comp_creator
 {
 public:
-  Gt_creator() {}                             /* Remove gcc warning */
-  virtual ~Gt_creator() {}                    /* Remove gcc warning */
+  Gt_creator() = default;                             /* Remove gcc warning */
+  virtual ~Gt_creator() = default;                    /* Remove gcc warning */
   Item_bool_rowready_func2* create(THD *thd, Item *a, Item *b) const;
   Item_bool_rowready_func2* create_swap(THD *thd, Item *a, Item *b) const;
   const char* symbol(bool invert) const { return invert? "<=" : ">"; }
@@ -3748,8 +3787,8 @@ public:
 class Lt_creator :public Comp_creator
 {
 public:
-  Lt_creator() {}                             /* Remove gcc warning */
-  virtual ~Lt_creator() {}                    /* Remove gcc warning */
+  Lt_creator() = default;                             /* Remove gcc warning */
+  virtual ~Lt_creator() = default;                    /* Remove gcc warning */
   Item_bool_rowready_func2* create(THD *thd, Item *a, Item *b) const;
   Item_bool_rowready_func2* create_swap(THD *thd, Item *a, Item *b) const;
   const char* symbol(bool invert) const { return invert? ">=" : "<"; }
@@ -3760,8 +3799,8 @@ public:
 class Ge_creator :public Comp_creator
 {
 public:
-  Ge_creator() {}                             /* Remove gcc warning */
-  virtual ~Ge_creator() {}                    /* Remove gcc warning */
+  Ge_creator() = default;                             /* Remove gcc warning */
+  virtual ~Ge_creator() = default;                    /* Remove gcc warning */
   Item_bool_rowready_func2* create(THD *thd, Item *a, Item *b) const;
   Item_bool_rowready_func2* create_swap(THD *thd, Item *a, Item *b) const;
   const char* symbol(bool invert) const { return invert? "<" : ">="; }
@@ -3772,8 +3811,8 @@ public:
 class Le_creator :public Comp_creator
 {
 public:
-  Le_creator() {}                             /* Remove gcc warning */
-  virtual ~Le_creator() {}                    /* Remove gcc warning */
+  Le_creator() = default;                             /* Remove gcc warning */
+  virtual ~Le_creator() = default;                    /* Remove gcc warning */
   Item_bool_rowready_func2* create(THD *thd, Item *a, Item *b) const;
   Item_bool_rowready_func2* create_swap(THD *thd, Item *a, Item *b) const;
   const char* symbol(bool invert) const { return invert? ">" : "<="; }

@@ -335,7 +335,7 @@ static int mrn_change_encoding(grn_ctx *ctx, const CHARSET_INFO *charset)
   return mrn::encoding::set(ctx, charset);
 }
 
-#if !defined(DBUG_OFF) && !defined(_lint)
+#if defined DBUG_TRACE && !defined(_lint)
 static const char *mrn_inspect_thr_lock_type(enum thr_lock_type lock_type)
 {
   const char *inspected = "<unknown>";
@@ -3381,16 +3381,16 @@ int ha_mroonga::wrapper_create_index(const char *name, TABLE *table,
                                          index_tables, NULL, tmp_share);
       }
     }
-  }
 
-  if (error) {
-    for (uint j = 0; j < i; j++) {
-      if (index_tables[j]) {
-        grn_obj_remove(ctx, index_tables[j]);
+    if (error) {
+      for (uint j = 0; j < i; j++) {
+        if (index_tables[j]) {
+          grn_obj_remove(ctx, index_tables[j]);
+        }
       }
+      grn_obj_remove(ctx, grn_table);
+      grn_table = NULL;
     }
-    grn_obj_remove(ctx, grn_table);
-    grn_table = NULL;
   }
   MRN_FREE_VARIABLE_LENGTH_ARRAYS(index_tables);
   DBUG_RETURN(error);
@@ -4963,6 +4963,17 @@ int ha_mroonga::wrapper_close()
   MRN_DBUG_ENTER_METHOD();
   MRN_SET_WRAP_SHARE_KEY(share, table->s);
   MRN_SET_WRAP_TABLE_KEY(this, table);
+#ifdef MRN_HANDLER_HAVE_CHECK_IF_SUPPORTED_INPLACE_ALTER
+  if (alter_key_info_buffer) {
+    my_free(alter_key_info_buffer);
+    alter_key_info_buffer = NULL;
+  }
+#else
+  if (wrap_alter_key_info) {
+    my_free(wrap_alter_key_info);
+    wrap_alter_key_info = NULL;
+  }
+#endif
 #ifdef MRN_HANDLER_HAVE_HA_CLOSE
   error = wrap_handler->ha_close();
 #else

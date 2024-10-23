@@ -63,6 +63,7 @@ typedef int my_socket;
 #endif /* my_socket_defined */
 #endif /* MY_GLOBAL_INCLUDED */
 
+#include "mariadb_capi_rename.h"
 #include "mysql_version.h"
 #include "mysql_com.h"
 #include "mysql_time.h"
@@ -140,6 +141,7 @@ typedef unsigned long long my_ulonglong;
 #define ER_WRONG_FK_OPTION_FOR_VIRTUAL_COLUMN ER_WRONG_FK_OPTION_FOR_GENERATED_COLUMN
 #define ER_UNSUPPORTED_ACTION_ON_VIRTUAL_COLUMN ER_UNSUPPORTED_ACTION_ON_GENERATED_COLUMN
 #define ER_UNSUPPORTED_ENGINE_FOR_VIRTUAL_COLUMNS ER_UNSUPPORTED_ENGINE_FOR_GENERATED_COLUMNS
+#define ER_QUERY_EXCEEDED_ROWS_EXAMINED_LIMIT ER_QUERY_RESULT_INCOMPLETE
 #define ER_KEY_COLUMN_DOES_NOT_EXITS ER_KEY_COLUMN_DOES_NOT_EXIST
 #define ER_DROP_PARTITION_NON_EXISTENT ER_PARTITION_DOES_NOT_EXIST
 
@@ -665,7 +667,7 @@ enum enum_mysql_stmt_state
 
   length         - On input: in case when lengths of input values
                    are different for each execute, you can set this to
-                   point at a variable containining value length. This
+                   point at a variable containing value length. This
                    way the value length can be different in each execute.
                    If length is not NULL, buffer_length is not used.
                    Note, length can even point at buffer_length if

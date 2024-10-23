@@ -1070,7 +1070,7 @@ static int chk_index(HA_CHECK *param, MARIA_HA *info, MARIA_KEYDEF *keyinfo,
          share->state.state.data_file_length) ||
         (share->data_file_type == NO_RECORD && record != 0))
     {
-#ifndef DBUG_OFF
+#ifdef DBUG_TRACE
       char llbuff2[22], llbuff3[22];
 #endif
       _ma_check_print_error(param,
@@ -2485,9 +2485,8 @@ static int initialize_variables_for_repair(HA_CHECK *param,
   tmp= (size_t) MY_MIN(sort_info->filelength,
                        (my_off_t) (SIZE_T_MAX/10/threads));
   tmp= MY_MAX(tmp * 8 * threads, (size_t) 65536);         /* Some margin */
-  param->sort_buffer_length= MY_MIN(param->orig_sort_buffer_length,
-                                    tmp);
-  set_if_smaller(param->sort_buffer_length, tmp);
+  param->sort_buffer_length= MY_MIN(param->orig_sort_buffer_length,                                    tmp);
+  set_if_bigger(param->sort_buffer_length, MARIA_MIN_SORT_MEMORY);
   /* Protect against too big sort buffer length */
 #if SIZEOF_SIZE_T >= 8
   set_if_smaller(param->sort_buffer_length, 16LL*1024LL*1024LL*1024LL);
@@ -4615,6 +4614,8 @@ int maria_repair_parallel(HA_CHECK *param, register MARIA_HA *info,
 #else
       param->sort_buffer_length*sort_param[i].key_length/total_key_length;
 #endif
+    set_if_bigger(sort_param[i].sortbuff_size, MARIA_MIN_SORT_MEMORY);
+
     if (mysql_thread_create(key_thread_find_all_keys,
                             &sort_param[i].thr, &thr_attr,
 	                    _ma_thr_find_all_keys, (void *) (sort_param+i)))
@@ -6350,6 +6351,9 @@ int maria_update_state_info(HA_CHECK *param, MARIA_HA *info,uint update)
 {
   MARIA_SHARE *share= info->s;
   DBUG_ENTER("maria_update_state_info");
+
+  if (info->s->no_status_updates)
+    DBUG_RETURN(0);                             /* S3 readonly table */
 
   if (update & UPDATE_OPEN_COUNT)
   {

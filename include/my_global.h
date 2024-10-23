@@ -1,6 +1,6 @@
 /*
    Copyright (c) 2001, 2013, Oracle and/or its affiliates.
-   Copyright (c) 2009, 2021, MariaDB Corporation.
+   Copyright (c) 2009, 2022, MariaDB Corporation.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -330,13 +330,6 @@ C_MODE_END
 #ifdef HAVE_UNISTD_H
 #include <unistd.h>
 #endif
-#if defined(__cplusplus) && defined(NO_CPLUSPLUS_ALLOCA)
-#undef HAVE_ALLOCA
-#undef HAVE_ALLOCA_H
-#endif
-#ifdef HAVE_ALLOCA_H
-#include <alloca.h>
-#endif
 
 #include <errno.h>				/* Recommended by debian */
 /* We need the following to go around a problem with openssl on solaris */
@@ -493,6 +486,7 @@ typedef unsigned short ushort;
 #endif
 
 #include <my_compiler.h>
+#include <my_alloca.h>
 
 /*
   Wen using the embedded library, users might run into link problems,
@@ -598,6 +592,9 @@ typedef SOCKET_SIZE_TYPE size_socket;
 #else
 #define HAVE_SOCK_CLOEXEC
 #endif
+#ifndef O_TEXT
+#define O_TEXT 0
+#endif
 
 /* additional file share flags for win32 */
 #ifdef _WIN32
@@ -642,7 +639,7 @@ typedef SOCKET_SIZE_TYPE size_socket;
   the mismatch of CRT and mysys file IO usage on Windows at runtime.
   CRT file descriptors can be in the range 0-2047, whereas descriptors returned
   by my_open() will start with 2048. If a file descriptor with value less then
-  MY_FILE_MIN is passed to mysys IO function, chances are it stemms from
+  MY_FILE_MIN is passed to mysys IO function, chances are it stems from
   open()/fileno() and not my_open()/my_fileno.
 
   For Posix,  mysys functions are light wrappers around libc, and MY_FILE_MIN
@@ -865,7 +862,7 @@ typedef long long	my_ptrdiff_t;
 #define STDCALL
 #endif
 
-/* Typdefs for easyier portability */
+/* Typdefs for easier portability */
 
 #ifndef HAVE_UCHAR
 typedef unsigned char	uchar;	/* Short for unsigned char */
@@ -1061,10 +1058,12 @@ typedef ulong		myf;	/* Type of MyFlags in my_funcs */
 static inline char *dlerror(void)
 {
   static char win_errormsg[2048];
-  FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM
-      | FORMAT_MESSAGE_IGNORE_INSERTS
-      | FORMAT_MESSAGE_MAX_WIDTH_MASK,
-    0, GetLastError(), 0, win_errormsg, 2048, NULL);
+  FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM |
+                 FORMAT_MESSAGE_IGNORE_INSERTS |
+                 FORMAT_MESSAGE_MAX_WIDTH_MASK,
+                 0, GetLastError(),
+                 MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US),
+                 win_errormsg, 2048, NULL);
   return win_errormsg;
 }
 #define HAVE_DLOPEN 1

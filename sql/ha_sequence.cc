@@ -250,6 +250,8 @@ int ha_sequence::write_row(const uchar *buf)
         on master and slaves
       - Check that the new row is an accurate SEQUENCE object
     */
+    /* mark a full binlog image insert to force non-parallel slave */
+    thd->transaction->stmt.mark_trans_did_ddl();
     if (table->s->tmp_table == NO_TMP_TABLE &&
         thd->mdl_context.upgrade_shared_lock(table->mdl_ticket,
                                              MDL_EXCLUSIVE,
@@ -452,6 +454,9 @@ static int sequence_initialize(void *p)
                                HTON_HIDDEN |
                                HTON_TEMPORARY_NOT_SUPPORTED |
                                HTON_ALTER_NOT_SUPPORTED |
+#ifdef WITH_WSREP
+                               HTON_WSREP_REPLICATION |
+#endif
                                HTON_NO_PARTITION);
   DBUG_RETURN(0);
 }

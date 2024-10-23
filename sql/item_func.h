@@ -243,12 +243,23 @@ public:
   */
   inline longlong check_integer_overflow(longlong value, bool val_unsigned)
   {
-    if ((unsigned_flag && !val_unsigned && value < 0) ||
-        (!unsigned_flag && val_unsigned &&
-         (ulonglong) value > (ulonglong) LONGLONG_MAX))
-      return raise_integer_overflow();
-    return value;
+    return check_integer_overflow(Longlong_hybrid(value, val_unsigned));
   }
+
+  // Check if the value is compatible with Item::unsigned_flag.
+  inline longlong check_integer_overflow(const Longlong_hybrid &sval)
+  {
+    Longlong_null res= sval.val_int(unsigned_flag);
+    return res.is_null() ? raise_integer_overflow() : res.value();
+  }
+
+  // Check if the value is compatible with Item::unsigned_flag.
+  longlong check_integer_overflow(const ULonglong_hybrid &uval)
+  {
+    Longlong_null res= uval.val_int(unsigned_flag);
+    return res.is_null() ? raise_integer_overflow() : res.value();
+  }
+
   /**
      Throw an error if the error code of a DECIMAL operation is E_DEC_OVERFLOW.
   */
@@ -373,7 +384,7 @@ public:
   {
     for (uint i= 0; i < arg_count; i++)
     {
-      args[i]->no_rows_in_result();
+      args[i]->restore_to_before_no_rows_in_result();
     }
   }
   void convert_const_compared_to_int_field(THD *thd);
@@ -469,7 +480,7 @@ public:
   class Handler
   {
   public:
-    virtual ~Handler() { }
+    virtual ~Handler() = default;
     virtual String *val_str(Item_handled_func *, String *) const= 0;
     virtual String *val_str_ascii(Item_handled_func *, String *) const= 0;
     virtual double val_real(Item_handled_func *) const= 0;
@@ -1207,6 +1218,18 @@ public:
     static LEX_CSTRING name= {STRING_WITH_LEN("<hash>") };
     return name;
   }
+};
+
+class Item_func_hash_mariadb_100403: public Item_func_hash
+{
+public:
+  Item_func_hash_mariadb_100403(THD *thd, List<Item> &item)
+   :Item_func_hash(thd, item)
+  {}
+  longlong val_int();
+  Item *get_copy(THD *thd)
+  { return get_item_copy<Item_func_hash_mariadb_100403>(thd, this); }
+  const char *func_name() const { return "<hash_mariadb_100403>"; }
 };
 
 class Item_longlong_func: public Item_int_func
@@ -1993,11 +2016,7 @@ public:
   }
   bool fix_length_and_dec(THD *thd) override;
   String *str_op(String *str) override { DBUG_ASSERT(0); return 0; }
-  bool native_op(THD *thd, Native *to) override
-  {
-    DBUG_ASSERT(0);
-    return true;
-  }
+  bool native_op(THD *thd, Native *to) override;
 };
 
 
@@ -2062,11 +2081,7 @@ public:
   my_decimal *decimal_op(my_decimal *) override;
   bool date_op(THD *thd, MYSQL_TIME *ltime, date_mode_t fuzzydate) override;
   bool time_op(THD *thd, MYSQL_TIME *ltime) override;
-  bool native_op(THD *thd, Native *to) override
-  {
-    DBUG_ASSERT(0);
-    return true;
-  }
+  bool native_op(THD *thd, Native *to) override;
   String *str_op(String *str) override
   {
     DBUG_ASSERT(0);
@@ -2117,8 +2132,7 @@ public:
   void cleanup() override { first_eval= TRUE; Item_real_func::cleanup(); }
   bool check_vcol_func_processor(void *arg) override
   {
-    return mark_unsupported_function(func_name(), "()", arg,
-                                     VCOL_NON_DETERMINISTIC);
+    return mark_unsupported_function(func_name(), "()", arg, VCOL_SESSION_FUNC);
   }
   Item *get_copy(THD *thd) override
   { return get_item_copy<Item_func_rand>(thd, this); }
@@ -3773,7 +3787,7 @@ public:
   }
   bool set(const Type_handler *handler,
            const Lex_length_and_dec_st & length_and_dec,
-           const Lex_charset_collation_st &cscl,
+           const Lex_column_charset_collation_attrs_st &cscl,
            CHARSET_INFO *defcs)
   {
     CHARSET_INFO *tmp= cscl.resolved_to_character_set(defcs);
@@ -3855,8 +3869,7 @@ public:
   Item_func_sp(THD *thd, Name_resolution_context *context_arg,
                sp_name *name, const Sp_handler *sph, List<Item> &list);
 
-  virtual ~Item_func_sp()
-  {}
+  virtual ~Item_func_sp() = default;
 
   void update_used_tables() override;
 
@@ -4164,9 +4177,7 @@ public:
   void print(String *str, enum_query_type query_type) override;
   bool check_vcol_func_processor(void *arg) override
   {
-    return mark_unsupported_function(func_name(), "()", arg,
-                                     (VCOL_NON_DETERMINISTIC |
-                                      VCOL_NOT_VIRTUAL));
+    return mark_unsupported_function(func_name(), "()", arg, VCOL_NEXTVAL);
   }
 };
 

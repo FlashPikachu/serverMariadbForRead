@@ -1000,6 +1000,11 @@ ODBConn::ODBConn(PGLOBAL g, TDBODBC *tdbp)
   m_Full = false;
   m_UseCnc = false;
   m_IDQuoteChar[0] = '"';
+  if (tdbp)
+  {
+    if (tdbp->Quoted && tdbp->Quote)
+      m_IDQuoteChar[0] = *tdbp->Quote;
+  }
   m_IDQuoteChar[1] = 0;
 //*m_ErrMsg = '\0';
   } // end of ODBConn
@@ -1153,7 +1158,7 @@ int ODBConn::Open(PCSZ ConnectString, POPARM sop, DWORD options)
 
     if (!m_UseCnc) {
       if (DriverConnect(options)) {
-        strcpy(g->Message, MSG(CONNECT_CANCEL));
+        snprintf(g->Message, sizeof(g->Message), MSG(CONNECT_CANCEL));
         return 0;
         } // endif
 
@@ -1182,8 +1187,9 @@ int ODBConn::Open(PCSZ ConnectString, POPARM sop, DWORD options)
     // Verify support for required functionality and cache info
 //  VerifyConnect();         Deprecated
     GetConnectInfo();
+    // Still we want to use the set QChar
   } catch(DBX *xp) {
-    sprintf(g->Message, "%s: %s", xp->m_Msg, xp->GetErrorMessage(0));
+    snprintf(g->Message, sizeof(g->Message), "%s: %s", xp->m_Msg, xp->GetErrorMessage(0));
     Close();
 //  Free();
     return -1;
@@ -1474,7 +1480,7 @@ int ODBConn::ExecDirectSQL(char *sql, ODBCCOL *tocols)
         ThrowDBX(rc, "SQLNumResultCols", hstmt);
 
       if (ncol == 0) {
-        strcpy(g->Message, "This Srcdef does not return a result set");
+        snprintf(g->Message, sizeof(g->Message), "This Srcdef does not return a result set");
         return -1;
         } // endif ncol
 
@@ -1517,7 +1523,7 @@ int ODBConn::ExecDirectSQL(char *sql, ODBCCOL *tocols)
         tp = GetSQLCType(colp->GetResultType());
 
         if (tp == SQL_TYPE_NULL) {
-          sprintf(m_G->Message, MSG(INV_COLUMN_TYPE),
+          snprintf(m_G->Message, sizeof(m_G->Message), MSG(INV_COLUMN_TYPE),
                   colp->GetResultType(), SVP(colp->GetName()));
           ThrowDBX(m_G->Message);
         } // endif tp
@@ -1543,7 +1549,7 @@ int ODBConn::ExecDirectSQL(char *sql, ODBCCOL *tocols)
       for (int i = 0; i < MAX_NUM_OF_MSG && x->m_ErrMsg[i]; i++)
         htrc(x->m_ErrMsg[i]);
 
-    sprintf(m_G->Message, "%s: %s", x->m_Msg, x->GetErrorMessage(0));
+    snprintf(m_G->Message, sizeof(m_G->Message), "%s: %s", x->m_Msg, x->GetErrorMessage(0));
 
     if (b)
       SQLCancel(hstmt);
@@ -1646,7 +1652,7 @@ int ODBConn::Fetch(int pos)
       for (int i = 0; i < MAX_NUM_OF_MSG && x->m_ErrMsg[i]; i++)
         htrc(x->m_ErrMsg[i]);
 
-    sprintf(g->Message, "%s: %s", x->m_Msg, x->GetErrorMessage(0));
+    snprintf(g->Message, sizeof(g->Message), "%s: %s", x->m_Msg, x->GetErrorMessage(0));
     irc = -1;
   } // end try/catch
 
@@ -1682,7 +1688,7 @@ int ODBConn::PrepareSQL(char *sql)
         for (int i = 0; i < MAX_NUM_OF_MSG && x->m_ErrMsg[i]; i++)
           htrc(x->m_ErrMsg[i]);
 
-    sprintf(g->Message, "%s: %s", x->m_Msg, x->GetErrorMessage(0));
+    snprintf(g->Message, sizeof(g->Message), "%s: %s", x->m_Msg, x->GetErrorMessage(0));
     } // end try/catch
 
     } // endif Mode
@@ -1728,7 +1734,7 @@ int ODBConn::PrepareSQL(char *sql)
       for (int i = 0; i < MAX_NUM_OF_MSG && x->m_ErrMsg[i]; i++)
         htrc(x->m_ErrMsg[i]);
 
-    sprintf(g->Message, "%s: %s", x->m_Msg, x->GetErrorMessage(0));
+    snprintf(g->Message, sizeof(g->Message), "%s: %s", x->m_Msg, x->GetErrorMessage(0));
 
     if (b)
       SQLCancel(hstmt);
@@ -1771,7 +1777,7 @@ int ODBConn::ExecuteSQL(void)
 
     if (ncol) {
       // This should never happen while inserting
-      strcpy(g->Message, "Logical error while inserting");
+      snprintf(g->Message, sizeof(g->Message), "Logical error while inserting");
     } else {
       // Insert, Update or Delete statement
       if (!Check(rc = SQLRowCount(m_hstmt, &afrw)))
@@ -1780,7 +1786,7 @@ int ODBConn::ExecuteSQL(void)
     } // endif ncol
 
   } catch(DBX *x) {
-    sprintf(m_G->Message, "%s: %s", x->m_Msg, x->GetErrorMessage(0));
+    snprintf(m_G->Message, sizeof(m_G->Message), "%s: %s", x->m_Msg, x->GetErrorMessage(0));
     SQLCancel(m_hstmt);
     rc = SQLFreeStmt(m_hstmt, SQL_DROP);
     m_hstmt = NULL;
@@ -1819,7 +1825,7 @@ bool ODBConn::BindParam(ODBCCOL *colp)
       ThrowDBX(rc, "SQLDescribeParam", m_hstmt);
 
   } catch(DBX *x) {
-    sprintf(m_G->Message, "%s: %s", x->m_Msg, x->GetErrorMessage(0));
+    snprintf(m_G->Message, sizeof(m_G->Message), "%s: %s", x->m_Msg, x->GetErrorMessage(0));
 #endif // 0
     colsize = colp->GetPrecision();
     sqlt = GetSQLType(buftype);
@@ -1917,10 +1923,10 @@ bool ODBConn::ExecSQLcommand(char *sql)
         ThrowDBX(rc, "SQLRowCount", hstmt);
 
       m_Tdb->AftRows = (int)afrw;
-      strcpy(g->Message, "Affected rows");
+      snprintf(g->Message, sizeof(g->Message), "Affected rows");
     } else {
       m_Tdb->AftRows = (int)ncol;
-      strcpy(g->Message, "Result set column number");
+      snprintf(g->Message, sizeof(g->Message), "Result set column number");
     } // endif ncol
 
   } catch(DBX *x) {
@@ -1928,7 +1934,7 @@ bool ODBConn::ExecSQLcommand(char *sql)
 			for (int i = 0; i < MAX_NUM_OF_MSG && x->m_ErrMsg[i]; i++)
 				htrc(x->m_ErrMsg[i]);
 
-    sprintf(g->Message, "Remote %s: %s", x->m_Msg, x->GetErrorMessage(0));
+    snprintf(g->Message, sizeof(g->Message), "Remote %s: %s", x->m_Msg, x->GetErrorMessage(0));
 
     if (b)
       SQLCancel(hstmt);
@@ -1938,17 +1944,17 @@ bool ODBConn::ExecSQLcommand(char *sql)
   } // end try/catch
 
   if (!Check(rc = SQLFreeStmt(hstmt, SQL_CLOSE)))
-    sprintf(g->Message, "SQLFreeStmt: rc=%d", rc);
+    snprintf(g->Message, sizeof(g->Message), "SQLFreeStmt: rc=%d", rc);
 
   if (m_Transact) {
     // Terminate the transaction
     if (!Check(rc = SQLEndTran(SQL_HANDLE_DBC, m_hdbc, 
                        (rcd) ? SQL_ROLLBACK : SQL_COMMIT)))
-      sprintf(g->Message, "SQLEndTran: rc=%d", rc);
+      snprintf(g->Message, sizeof(g->Message), "SQLEndTran: rc=%d", rc);
 
     if (!Check(rc = SQLSetConnectAttr(m_hdbc, SQL_ATTR_AUTOCOMMIT,
                (SQLPOINTER)SQL_AUTOCOMMIT_ON, SQL_IS_UINTEGER)))
-      sprintf(g->Message, "SQLSetConnectAttr: rc=%d", rc);
+      snprintf(g->Message, sizeof(g->Message), "SQLSetConnectAttr: rc=%d", rc);
 
     m_Transact = false;
     } // endif m_Transact
@@ -2013,12 +2019,12 @@ PQRYRES ODBConn::GetMetaData(PGLOBAL g, PCSZ dsn, PCSZ src)
       } // endfor i
 
   } catch(DBX *x) {
-    sprintf(g->Message, "%s: %s", x->m_Msg, x->GetErrorMessage(0));
+    snprintf(g->Message, sizeof(g->Message), "%s: %s", x->m_Msg, x->GetErrorMessage(0));
     goto err;
   } // end try/catch
 
   if (!ncol) {
-    strcpy(g->Message, "Invalid Srcdef");
+    snprintf(g->Message, sizeof(g->Message), "Invalid Srcdef");
     goto err;
     } // endif ncol
 
@@ -2064,7 +2070,7 @@ PQRYRES ODBConn::GetMetaData(PGLOBAL g, PCSZ dsn, PCSZ src)
       } // endfor i
 
   } catch(DBX *x) {
-    sprintf(g->Message, "%s: %s", x->m_Msg, x->GetErrorMessage(0));
+    snprintf(g->Message, sizeof(g->Message), "%s: %s", x->m_Msg, x->GetErrorMessage(0));
     qrp = NULL;
   } // end try/catch
 
@@ -2116,7 +2122,7 @@ bool ODBConn::GetDataSources(PQRYRES qrp)
       } // endfor i
 
   } catch(DBX *x) {
-    sprintf(m_G->Message, "%s: %s", x->m_Msg, x->GetErrorMessage(0));
+    snprintf(m_G->Message, sizeof(m_G->Message), "%s: %s", x->m_Msg, x->GetErrorMessage(0));
     rv = true;
   } // end try/catch
 
@@ -2167,7 +2173,7 @@ bool ODBConn::GetDrivers(PQRYRES qrp)
       } // endfor n
 
   } catch(DBX *x) {
-    sprintf(m_G->Message, "%s: %s", x->m_Msg, x->GetErrorMessage(0));
+    snprintf(m_G->Message, sizeof(m_G->Message), "%s: %s", x->m_Msg, x->GetErrorMessage(0));
     rv = true;
   } // end try/catch
 
@@ -2374,7 +2380,7 @@ int ODBConn::GetCatInfo(CATPARM *cap)
     // Now bind the column buffers
     for (n = 0, crp = qrp->Colresp; crp; crp = crp->Next) {
       if ((tp = GetSQLCType(crp->Type)) == SQL_TYPE_NULL) {
-        sprintf(g->Message, MSG(INV_COLUMN_TYPE), crp->Type, crp->Name);
+        snprintf(g->Message, sizeof(g->Message), MSG(INV_COLUMN_TYPE), crp->Type, crp->Name);
         ThrowDBX(g->Message);
         } // endif tp
 
@@ -2460,9 +2466,9 @@ int ODBConn::GetCatInfo(CATPARM *cap)
 
     if (rc == SQL_NO_DATA_FOUND) {
       if (cap->Pat)
-        sprintf(g->Message, MSG(NO_TABCOL_DATA), cap->Tab, cap->Pat);
+        snprintf(g->Message, sizeof(g->Message), MSG(NO_TABCOL_DATA), cap->Tab, cap->Pat);
       else
-        sprintf(g->Message, MSG(NO_TAB_DATA), cap->Tab);
+        snprintf(g->Message, sizeof(g->Message), MSG(NO_TAB_DATA), cap->Tab);
 
       ThrowDBX(g->Message);
     } else if (rc == SQL_SUCCESS) {
@@ -2487,7 +2493,7 @@ int ODBConn::GetCatInfo(CATPARM *cap)
       for (int i = 0; i < MAX_NUM_OF_MSG && x->m_ErrMsg[i]; i++)
         htrc(x->m_ErrMsg[i]);
 
-    sprintf(g->Message, "%s: %s", x->m_Msg, x->GetErrorMessage(0));
+    snprintf(g->Message, sizeof(g->Message), "%s: %s", x->m_Msg, x->GetErrorMessage(0));
     irc = -1;
   } // end try/catch
 
@@ -2512,7 +2518,7 @@ PQRYRES ODBConn::AllocateResult(PGLOBAL g)
   PQRYRES      qrp;
 
   if (!m_Rows) {
-    strcpy(g->Message, "Void result");
+    snprintf(g->Message, sizeof(g->Message), "Void result");
     return NULL;
     } // endif m_Res
 
@@ -2549,7 +2555,7 @@ PQRYRES ODBConn::AllocateResult(PGLOBAL g)
 
       if (!(crp->Kdata = AllocValBlock(g, NULL, crp->Type, m_Rows,
                                      crp->Clen, 0, FALSE, TRUE, uns))) {
-        sprintf(g->Message, MSG(INV_RESULT_TYPE),
+        snprintf(g->Message, sizeof(g->Message), MSG(INV_RESULT_TYPE),
                           GetFormatType(crp->Type));
         return NULL;
         } // endif Kdata
@@ -2577,7 +2583,7 @@ int ODBConn::Rewind(char *sql, ODBCCOL *tocols)
   int rc, rbuf = -1;
 
   if (!m_hstmt)
-    rbuf = -1;
+    rbuf = 0;
   else if (m_Full)
     rbuf = m_Rows;           // No need to "rewind"
   else if (m_Scrollable) {
@@ -2591,7 +2597,7 @@ int ODBConn::Rewind(char *sql, ODBCCOL *tocols)
 
       rbuf = (int)crow;
     } catch(DBX *x) {
-      sprintf(m_G->Message, "%s: %s", x->m_Msg, x->GetErrorMessage(0));
+      snprintf(m_G->Message, sizeof(m_G->Message), "%s: %s", x->m_Msg, x->GetErrorMessage(0));
       rbuf = -1;
     } // end try/catch
 

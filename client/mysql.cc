@@ -1,6 +1,6 @@
 /*
    Copyright (c) 2000, 2018, Oracle and/or its affiliates.
-   Copyright (c) 2009, 2021, MariaDB Corporation.
+   Copyright (c) 2009, 2022, MariaDB Corporation.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -42,7 +42,7 @@
 #include <violite.h>
 #include <my_sys.h>
 #include <source_revision.h>
-#if defined(USE_LIBEDIT_INTERFACE) && defined(HAVE_LOCALE_H)
+#if defined(HAVE_LOCALE_H)
 #include <locale.h>
 #endif
 
@@ -298,8 +298,6 @@ unsigned short terminal_width= 80;
 
 static uint opt_protocol=0;
 static const char *opt_protocol_type= "";
-
-static uint protocol_to_force= MYSQL_PROTOCOL_DEFAULT;
 
 #include "sslopt-vars.h"
 
@@ -1269,14 +1267,6 @@ int main(int argc,char *argv[])
     exit(status.exit_status);
   }
 
-  /* Command line options override configured protocol */
-  if (protocol_to_force > MYSQL_PROTOCOL_DEFAULT
-      && protocol_to_force != opt_protocol)
-  {
-    warn_protocol_override(current_host, &opt_protocol, protocol_to_force);
-  }
-
-
   if (status.batch && !status.line_buff &&
       !(status.line_buff= batch_readline_init(MAX_BATCH_BUFFER_SIZE, stdin)))
   {
@@ -1660,6 +1650,8 @@ static struct my_option my_long_options[] =
    &delimiter_str, 0, GET_STR, REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
   {"execute", 'e', "Execute command and quit. (Disables --force and history file.)", 0,
    0, 0, GET_STR, REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
+  {"enable-cleartext-plugin", OPT_COMPATIBILTY_CLEARTEXT_PLUGIN, "Obsolete option. Exists only for MySQL compatibility.",
+   0, 0, 0, GET_NO_ARG, NO_ARG, 0, 0, 0, 0, 0, 0},
   {"vertical", 'E', "Print the output of a query (rows) vertically.",
    &vertical, &vertical, 0, GET_BOOL, NO_ARG, 0, 0, 0, 0, 0,
    0},
@@ -1868,11 +1860,9 @@ static void usage(int version)
 
 
 my_bool
-get_one_option(const struct my_option *opt, const char *argument, const char *filename)
+get_one_option(const struct my_option *opt, const char *argument,
+               const char *filename)
 {
-  /* Track when protocol is set via CLI to not force port TCP protocol override */
-  static my_bool ignore_protocol_override = FALSE;
-
   switch(opt->id) {
   case OPT_CHARSETS_DIR:
     strmake_buf(mysql_charsets_dir, argument);
@@ -1933,18 +1923,11 @@ get_one_option(const struct my_option *opt, const char *argument, const char *fi
 #ifndef EMBEDDED_LIBRARY
     if (!argument[0])
       opt_protocol= 0;
-    else if ((opt_protocol= find_type_with_warning(argument, &sql_protocol_typelib,
+    else if ((opt_protocol=
+              find_type_with_warning(argument, &sql_protocol_typelib,
                                                    opt->name)) <= 0)
       exit(1);
 #endif
-
-    /* Specification of protocol via CLI trumps implicit overrides */
-    if (filename[0] == '\0')
-    {
-      ignore_protocol_override = TRUE;
-      protocol_to_force = MYSQL_PROTOCOL_DEFAULT;
-    }
-
     break;
   case OPT_SERVER_ARG:
 #ifdef EMBEDDED_LIBRARY
@@ -1968,6 +1951,14 @@ get_one_option(const struct my_option *opt, const char *argument, const char *fi
 #else /*EMBEDDED_LIBRARY */
     printf("WARNING: --server-arg option not supported in this configuration.\n");
 #endif
+    break;
+  case OPT_COMPATIBILTY_CLEARTEXT_PLUGIN:
+    /*
+      This option exists in MySQL client but not in MariaDB. Users switching from
+      MySQL might still have this option in their commands, and it will not work
+      in MariaDB unless it is handled. Therefore output a warning and continue.
+    */
+    printf("WARNING: option '--enable-cleartext-plugin' is obsolete.\n");
     break;
   case 'A':
     opt_rehash= 0;
@@ -2036,13 +2027,6 @@ get_one_option(const struct my_option *opt, const char *argument, const char *fi
 #ifdef _WIN32
     opt_protocol = MYSQL_PROTOCOL_PIPE;
     opt_protocol_type= "pipe";
-
-    /* Prioritize pipe if explicit via command line */
-    if (filename[0] == '\0')
-    {
-      ignore_protocol_override = TRUE;
-      protocol_to_force = MYSQL_PROTOCOL_DEFAULT;
-    }
 #endif
     break;
 #include <sslopt-case.h>
@@ -2055,35 +2039,24 @@ get_one_option(const struct my_option *opt, const char *argument, const char *fi
     mysql_end(-1);
     break;
   case 'P':
-    /* If port and socket are set, fall back to default behavior */
-    if (protocol_to_force == SOCKET_PROTOCOL_TO_FORCE)
+    if (filename[0] == '\0')
     {
-      ignore_protocol_override = TRUE;
-      protocol_to_force = MYSQL_PROTOCOL_DEFAULT;
-    }
-
-    /* If port is set via CLI, try to force protocol to TCP */
-    if (filename[0] == '\0' &&
-        !ignore_protocol_override &&
-        protocol_to_force == MYSQL_PROTOCOL_DEFAULT)
-    {
-      protocol_to_force = MYSQL_PROTOCOL_TCP;
+      /* Port given on command line, switch protocol to use TCP */
+      opt_protocol= MYSQL_PROTOCOL_TCP;
     }
     break;
   case 'S':
-    /* If port and socket are set, fall back to default behavior */
-    if (protocol_to_force == MYSQL_PROTOCOL_TCP)
+    if (filename[0] == '\0')
     {
-      ignore_protocol_override = TRUE;
-      protocol_to_force = MYSQL_PROTOCOL_DEFAULT;
-    }
-
-    /* Prioritize socket if set via command line */
-    if (filename[0] == '\0' &&
-        !ignore_protocol_override &&
-        protocol_to_force == MYSQL_PROTOCOL_DEFAULT)
-    {
-      protocol_to_force = SOCKET_PROTOCOL_TO_FORCE;
+      /*
+        Socket given on command line, switch protocol to use SOCKETSt
+        Except on Windows if 'protocol= pipe' has been provided in
+        the config file or command line.
+      */
+      if (opt_protocol != MYSQL_PROTOCOL_PIPE)
+      {
+        opt_protocol= MYSQL_PROTOCOL_SOCKET;
+      }
     }
     break;
   case 'I':
@@ -2149,7 +2122,7 @@ static int get_options(int argc, char **argv)
     current_db= my_strdup(PSI_NOT_INSTRUMENTED, *argv, MYF(MY_WME));
   }
   if (tty_password)
-    opt_password= get_tty_password(NullS);
+    opt_password= my_get_tty_password(NullS);
   if (debug_info_flag)
     my_end_arg= MY_CHECK_ERROR | MY_GIVE_INFO;
   if (debug_check_flag)
@@ -2496,7 +2469,7 @@ static bool add_line(String &buffer, char *line, size_t line_length,
         !(*in_string &&
           (mysql.server_status & SERVER_STATUS_NO_BACKSLASH_ESCAPES)))
     {
-      // Found possbile one character command like \c
+      // Found possible one character command like \c
 
       /*
         The null-terminating character (ASCII '\0') marks the end of user
@@ -2847,6 +2820,9 @@ static void initialize_readline ()
   /* Allow conditional parsing of the ~/.inputrc file. */
   rl_readline_name= (char *) "mysql";
   rl_terminal_name= getenv("TERM");
+#ifdef HAVE_SETLOCALE
+  setlocale(LC_ALL,"");
+#endif
 
   /* Tell the completer that we want a crack first. */
 #if defined(USE_NEW_READLINE_INTERFACE)
@@ -2855,9 +2831,6 @@ static void initialize_readline ()
 
   rl_add_defun("magic-space", (rl_command_func_t *)&fake_magic_space, -1);
 #elif defined(USE_LIBEDIT_INTERFACE)
-#ifdef HAVE_LOCALE_H
-  setlocale(LC_ALL,""); /* so as libedit use isprint */
-#endif
   rl_attempted_completion_function= (CPPFunction*)&new_mysql_completion;
   rl_completion_entry_function= &no_completion;
   rl_add_defun("magic-space", (Function*)&fake_magic_space, -1);
@@ -3781,7 +3754,6 @@ print_table_data(MYSQL_RES *result)
 {
   String separator(256);
   MYSQL_ROW	cur;
-  MYSQL_FIELD	*field;
   bool		*num_flag;
 
   num_flag=(bool*) my_alloca(sizeof(bool)*mysql_num_fields(result));
@@ -3789,11 +3761,14 @@ print_table_data(MYSQL_RES *result)
   {
     print_field_types(result);
     if (!mysql_num_rows(result))
+    {
+      my_afree((uchar*) num_flag);
       return;
+    }
     mysql_field_seek(result,0);
   }
   separator.copy("+",1,charset_info);
-  while ((field = mysql_fetch_field(result)))
+  while (MYSQL_FIELD *field= mysql_fetch_field(result))
   {
     uint length= column_names ? field->name_length : 0;
     if (quick)
@@ -3815,7 +3790,7 @@ print_table_data(MYSQL_RES *result)
   {
     mysql_field_seek(result,0);
     (void) tee_fputs("|", PAGER);
-    for (uint off=0; (field = mysql_fetch_field(result)) ; off++)
+    while (MYSQL_FIELD *field= mysql_fetch_field(result))
     {
       size_t name_length= (uint) strlen(field->name);
       size_t numcells= charset_info->numcells(field->name,
@@ -3857,7 +3832,7 @@ print_table_data(MYSQL_RES *result)
         data_length= (uint) lengths[off];
       }
 
-      field= mysql_fetch_field(result);
+      MYSQL_FIELD *field= mysql_fetch_field(result);
       field_max_length= field->max_length;
 
       /* 
@@ -4851,7 +4826,7 @@ char *mysql_authentication_dialog_ask(MYSQL *mysql, int type,
 
   if (type == 2) /* password */
   {
-    s= get_tty_password("");
+    s= my_get_tty_password("");
     strnmov(buf, s, buf_len);
     buf[buf_len-1]= 0;
     my_free(s);
@@ -5587,6 +5562,7 @@ static void init_username()
     full_username=my_strdup(PSI_NOT_INSTRUMENTED, cur[0],MYF(MY_WME));
     part_username=my_strdup(PSI_NOT_INSTRUMENTED, strtok(cur[0],"@"),MYF(MY_WME));
     (void) mysql_fetch_row(result);		// Read eof
+    mysql_free_result(result);
   }
 }
 

@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 1996, 2016, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2016, 2022, MariaDB Corporation.
+Copyright (c) 2016, 2023, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -74,6 +74,8 @@ dict_load_index_low(
 	byte*		table_id,	/*!< in/out: table id (8 bytes),
 					an "in" value if mtr
 					and "out" when !mtr */
+	bool		uncommitted,	/*!< in: false=READ COMMITTED,
+					true=READ UNCOMMITTED */
 	mem_heap_t*	heap,		/*!< in/out: temporary memory heap */
 	const rec_t*	rec,		/*!< in: SYS_INDEXES record */
 	mtr_t*		mtr,		/*!< in/out: mini-transaction,
@@ -83,30 +85,30 @@ dict_load_index_low(
 	dict_index_t**	index);		/*!< out,own: index, or NULL */
 
 /** Load a table column definition from a SYS_COLUMNS record to dict_table_t.
-@return	error message
-@retval	NULL on success */
-static
-const char*
-dict_load_column_low(
-	dict_table_t*	table,		/*!< in/out: table, could be NULL
-					if we just populate a dict_column_t
-					struct with information from
-					a SYS_COLUMNS record */
-	mem_heap_t*	heap,		/*!< in/out: memory heap
-					for temporary storage */
-	dict_col_t*	column,		/*!< out: dict_column_t to fill,
-					or NULL if table != NULL */
-	table_id_t*	table_id,	/*!< out: table id */
-	const char**	col_name,	/*!< out: column name */
-	const rec_t*	rec,		/*!< in: SYS_COLUMNS record */
-	mtr_t*		mtr,		/*!< in/out: mini-transaction */
-	ulint*		nth_v_col);	/*!< out: if not NULL, this
-					records the "n" of "nth" virtual
-					column */
+@param table           table, or nullptr if the output will be in column
+@param use_uncommitted 0=READ COMMITTED, 1=detect, 2=READ UNCOMMITTED
+@param heap            memory heap for temporary storage
+@param column          pointer to output buffer, or nullptr if table!=nullptr
+@param table_id        table identifier
+@param col_name        column name
+@param rec             SYS_COLUMNS record
+@param mtr             mini-transaction
+@param nth_v_col       nullptr, or pointer to a counter of virtual columns
+@return error message
+@retval nullptr on success */
+static const char *dict_load_column_low(dict_table_t *table,
+                                        unsigned use_uncommitted,
+                                        mem_heap_t *heap, dict_col_t *column,
+                                        table_id_t *table_id,
+                                        const char **col_name,
+                                        const rec_t *rec,
+                                        mtr_t *mtr,
+                                        ulint *nth_v_col);
 
 /** Load a virtual column "mapping" (to base columns) information
 from a SYS_VIRTUAL record
 @param[in,out]	table		table
+@param[in]	uncommitted	false=READ COMMITTED, true=READ UNCOMMITTED
 @param[in,out]	column		mapped base column's dict_column_t
 @param[in,out]	table_id	table id
 @param[in,out]	pos		virtual column position
@@ -118,6 +120,7 @@ static
 const char*
 dict_load_virtual_low(
 	dict_table_t*	table,
+	bool		uncommitted,
 	dict_col_t**	column,
 	table_id_t*	table_id,
 	ulint*		pos,
@@ -133,6 +136,8 @@ dict_load_field_low(
 	byte*		index_id,	/*!< in/out: index id (8 bytes)
 					an "in" value if index != NULL
 					and "out" if index == NULL */
+	bool		uncommitted,	/*!< in: false=READ COMMITTED,
+					true=READ UNCOMMITTED */
 	dict_index_t*	index,		/*!< in/out: index, could be NULL
 					if we just populate a dict_field_t
 					struct with information from
@@ -210,8 +215,10 @@ dict_startscan_system(
 	mtr_t*		mtr,		/*!< in: the mini-transaction */
 	dict_table_t*	table)		/*!< in: system table */
 {
-  btr_pcur_open_at_index_side(true, table->indexes.start, BTR_SEARCH_LEAF,
-                              pcur, true, 0, mtr);
+  btr_pcur_init(pcur);
+  if (pcur->open_leaf(true, table->indexes.start, BTR_SEARCH_LEAF, mtr) !=
+      DB_SUCCESS)
+    return nullptr;
   const rec_t *rec;
   do
     rec= dict_getnext_system_low(pcur, mtr);
@@ -229,17 +236,12 @@ dict_getnext_system(
 					to the record */
 	mtr_t*		mtr)		/*!< in: the mini-transaction */
 {
-	const rec_t*	rec;
-
-	/* Restore the position */
-	pcur->restore_position(BTR_SEARCH_LEAF, mtr);
-
-	/* Get the next record */
-	do {
-		rec = dict_getnext_system_low(pcur, mtr);
-	} while (rec && rec_get_deleted_flag(rec, 0));
-
-	return(rec);
+  const rec_t *rec=nullptr;
+  if (pcur->restore_position(BTR_SEARCH_LEAF, mtr) != btr_pcur_t::CORRUPTED)
+    do
+      rec= dict_getnext_system_low(pcur, mtr);
+    while (rec && rec_get_deleted_flag(rec, 0));
+  return rec;
 }
 
 /********************************************************************//**
@@ -255,18 +257,16 @@ dict_process_sys_indexes_rec(
 	dict_index_t*	index,		/*!< out: index to be filled */
 	table_id_t*	table_id)	/*!< out: index table id */
 {
-	const char*	err_msg;
-	byte		buf[8];
+  byte buf[8];
 
-	ut_d(index->is_dummy = true);
-	ut_d(index->in_instant_init = false);
+  ut_d(index->is_dummy = true);
+  ut_d(index->in_instant_init = false);
 
-	/* Parse the record, and get "dict_index_t" struct filled */
-	err_msg = dict_load_index_low(buf, heap, rec, nullptr, nullptr, &index);
-
-	*table_id = mach_read_from_8(buf);
-
-	return(err_msg);
+  /* Parse the record, and get "dict_index_t" struct filled */
+  const char *err_msg= dict_load_index_low(buf, false, heap, rec,
+                                           nullptr, nullptr, &index);
+  *table_id= mach_read_from_8(buf);
+  return err_msg;
 }
 
 /********************************************************************//**
@@ -287,7 +287,7 @@ dict_process_sys_columns_rec(
 	const char*	err_msg;
 
 	/* Parse the record, and get "dict_col_t" struct filled */
-	err_msg = dict_load_column_low(NULL, heap, column,
+	err_msg = dict_load_column_low(NULL, 0, heap, column,
 				       table_id, col_name, rec, nullptr,
 				       nth_v_col);
 
@@ -308,7 +308,8 @@ dict_process_sys_virtual_rec(
 	ulint*		pos,
 	ulint*		base_pos)
 {
-  return dict_load_virtual_low(nullptr, nullptr, table_id, pos, base_pos, rec);
+  return dict_load_virtual_low(nullptr, false, nullptr, table_id,
+                               pos, base_pos, rec);
 }
 
 /********************************************************************//**
@@ -332,7 +333,7 @@ dict_process_sys_fields_rec(
 
 	mach_write_to_8(last_index_id, last_id);
 
-	err_msg = dict_load_field_low(buf, NULL, sys_field,
+	err_msg = dict_load_field_low(buf, false, nullptr, sys_field,
 				      pos, last_index_id, heap, nullptr, rec);
 
 	*index_id = mach_read_from_8(buf);
@@ -635,6 +636,7 @@ enum table_read_status { READ_OK= 0, READ_ERROR, READ_NOT_FOUND };
 
 /** Read and return 5 integer fields from a SYS_TABLES record.
 @param[in]	rec		A record of SYS_TABLES
+@param[in]	uncommitted	true=use READ UNCOMMITTED, false=READ COMMITTED
 @param[in]	mtr		mini-transaction
 @param[out]	table_id	Pointer to the table_id for this table
 @param[out]	space_id	Pointer to the space_id for this table
@@ -649,6 +651,7 @@ static
 table_read_status
 dict_sys_tables_rec_read(
 	const rec_t*		rec,
+	bool			uncommitted,
 	mtr_t*			mtr,
 	table_id_t*		table_id,
 	uint32_t*		space_id,
@@ -665,7 +668,7 @@ dict_sys_tables_rec_read(
 		rec, DICT_FLD__SYS_TABLES__DB_TRX_ID, &len);
 	ut_ad(len == 6 || len == UNIV_SQL_NULL);
 	trx_id_t id = len == 6 ? trx_read_trx_id(field) : 0;
-	if (id && trx_sys.find(nullptr, id, false)) {
+	if (id && !uncommitted && trx_sys.find(nullptr, id, false)) {
 		const auto savepoint = mtr->get_savepoint();
 		heap = mem_heap_create(1024);
 		dict_index_t* index = UT_LIST_GET_FIRST(
@@ -826,7 +829,8 @@ err_exit:
 	high bit set in n_cols, and flags would be zero.
 	MySQL 4.1 was the first version to support innodb_file_per_table,
 	that is, *space_id != 0. */
-	if (not_redundant || *space_id != 0 || *n_cols & DICT_N_COLS_COMPACT) {
+	if (not_redundant || *space_id != 0 || *n_cols & DICT_N_COLS_COMPACT
+	    || fil_system.sys_space->full_crc32()) {
 
 		/* Get flags2 from SYS_TABLES.MIX_LEN */
 		field = rec_get_nth_field_old(
@@ -861,22 +865,28 @@ err_exit:
 	return READ_OK;
 }
 
-/** Load and check each non-predefined tablespace mentioned in SYS_TABLES.
-Search SYS_TABLES and check each tablespace mentioned that has not
-already been added to the fil_system.  If it is valid, add it to the
-file_system list.
-@return the highest space ID found. */
-static uint32_t dict_check_sys_tables()
+/** Check each tablespace found in the data dictionary.
+Then look at each table defined in SYS_TABLES that has a space_id > 0
+to find all the file-per-table tablespaces.
+
+In a crash recovery we already have some tablespace objects created from
+processing the REDO log. We will compare the
+space_id information in the data dictionary to what we find in the
+tablespace file. In addition, more validation will be done if recovery
+was needed and force_recovery is not set.
+
+We also scan the biggest space id, and store it to fil_system. */
+void dict_check_tablespaces_and_store_max_id()
 {
 	uint32_t	max_space_id = 0;
 	btr_pcur_t	pcur;
 	mtr_t		mtr;
 
-	DBUG_ENTER("dict_check_sys_tables");
+	DBUG_ENTER("dict_check_tablespaces_and_store_max_id");
 
-	ut_ad(dict_sys.locked());
+	mtr.start();
 
-	mtr_start(&mtr);
+	dict_sys.lock(SRW_LOCK_CALL);
 
 	for (const rec_t *rec = dict_startscan_system(&pcur, &mtr,
 						      dict_sys.sys_tables);
@@ -901,7 +911,8 @@ static uint32_t dict_check_sys_tables()
 		DBUG_PRINT("dict_check_sys_tables",
 			   ("name: %*.s", static_cast<int>(len), field));
 
-		if (dict_sys_tables_rec_read(rec, &mtr, &table_id, &space_id,
+		if (dict_sys_tables_rec_read(rec, false,
+					     &mtr, &table_id, &space_id,
 					     &n_cols, &flags, &flags2, nullptr)
 		    != READ_OK
 		    || space_id == TRX_SYS_SPACE) {
@@ -960,42 +971,8 @@ static uint32_t dict_check_sys_tables()
 		ut_free(filepath);
 	}
 
-	mtr_commit(&mtr);
-
-	DBUG_RETURN(max_space_id);
-}
-
-/** Check each tablespace found in the data dictionary.
-Then look at each table defined in SYS_TABLES that has a space_id > 0
-to find all the file-per-table tablespaces.
-
-In a crash recovery we already have some tablespace objects created from
-processing the REDO log. We will compare the
-space_id information in the data dictionary to what we find in the
-tablespace file. In addition, more validation will be done if recovery
-was needed and force_recovery is not set.
-
-We also scan the biggest space id, and store it to fil_system. */
-void dict_check_tablespaces_and_store_max_id()
-{
-	mtr_t	mtr;
-
-	DBUG_ENTER("dict_check_tablespaces_and_store_max_id");
-
-	dict_sys.lock(SRW_LOCK_CALL);
-
-	/* Initialize the max space_id from sys header */
-	mtr.start();
-	uint32_t max_space_id = mach_read_from_4(DICT_HDR_MAX_SPACE_ID
-						 + DICT_HDR
-						 + dict_hdr_get(&mtr)
-						 ->page.frame);
 	mtr.commit();
 
-	fil_set_max_space_id_if_bigger(max_space_id);
-
-	/* Open all tablespaces referenced in SYS_TABLES. */
-	max_space_id = dict_check_sys_tables();
 	fil_set_max_space_id_if_bigger(max_space_id);
 
 	dict_sys.unlock();
@@ -1005,29 +982,31 @@ void dict_check_tablespaces_and_store_max_id()
 
 /** Error message for a delete-marked record in dict_load_column_low() */
 static const char *dict_load_column_del= "delete-marked record in SYS_COLUMNS";
+/** Error message for a missing record in dict_load_column_low() */
 static const char *dict_load_column_none= "SYS_COLUMNS record not found";
+/** Message for incomplete instant ADD/DROP in dict_load_column_low() */
+static const char *dict_load_column_instant= "incomplete instant ADD/DROP";
 
 /** Load a table column definition from a SYS_COLUMNS record to dict_table_t.
-@return	error message
-@retval	NULL on success */
-static
-const char*
-dict_load_column_low(
-	dict_table_t*	table,		/*!< in/out: table, could be NULL
-					if we just populate a dict_column_t
-					struct with information from
-					a SYS_COLUMNS record */
-	mem_heap_t*	heap,		/*!< in/out: memory heap
-					for temporary storage */
-	dict_col_t*	column,		/*!< out: dict_column_t to fill,
-					or NULL if table != NULL */
-	table_id_t*	table_id,	/*!< out: table id */
-	const char**	col_name,	/*!< out: column name */
-	const rec_t*	rec,		/*!< in: SYS_COLUMNS record */
-	mtr_t*		mtr,		/*!< in/out: mini-transaction */
-	ulint*		nth_v_col)	/*!< out: if not NULL, this
-					records the "n" of "nth" virtual
-					column */
+@param table           table, or nullptr if the output will be in column
+@param use_uncommitted 0=READ COMMITTED, 1=detect, 2=READ UNCOMMITTED
+@param heap            memory heap for temporary storage
+@param column          pointer to output buffer, or nullptr if table!=nullptr
+@param table_id        table identifier
+@param col_name        column name
+@param rec             SYS_COLUMNS record
+@param mtr             mini-transaction
+@param nth_v_col       nullptr, or pointer to a counter of virtual columns
+@return error message
+@retval nullptr on success */
+static const char *dict_load_column_low(dict_table_t *table,
+                                        unsigned use_uncommitted,
+                                        mem_heap_t *heap, dict_col_t *column,
+                                        table_id_t *table_id,
+                                        const char **col_name,
+                                        const rec_t *rec,
+                                        mtr_t *mtr,
+                                        ulint *nth_v_col)
 {
 	char*		name;
 	const byte*	field;
@@ -1073,7 +1052,11 @@ err_len:
 
 	const trx_id_t trx_id = trx_read_trx_id(field);
 
-	if (trx_id && mtr && trx_sys.find(nullptr, trx_id, false)) {
+	if (trx_id && mtr && use_uncommitted < 2
+	    && trx_sys.find(nullptr, trx_id, false)) {
+		if (use_uncommitted) {
+			return dict_load_column_instant;
+		}
 		const auto savepoint = mtr->get_savepoint();
 		dict_index_t* index = UT_LIST_GET_FIRST(
 			dict_sys.sys_columns->indexes);
@@ -1202,6 +1185,7 @@ static const char *dict_load_virtual_none= "SYS_VIRTUAL record not found";
 /** Load a virtual column "mapping" (to base columns) information
 from a SYS_VIRTUAL record
 @param[in,out]	table		table
+@param[in]	uncommitted	false=READ COMMITTED, true=READ UNCOMMITTED
 @param[in,out]	column		mapped base column's dict_column_t
 @param[in,out]	table_id	table id
 @param[in,out]	pos		virtual column position
@@ -1213,6 +1197,7 @@ static
 const char*
 dict_load_virtual_low(
 	dict_table_t*	table,
+	bool		uncommitted,
 	dict_col_t**	column,
 	table_id_t*	table_id,
 	ulint*		pos,
@@ -1276,10 +1261,11 @@ err_len:
 
 	const trx_id_t trx_id = trx_read_trx_id(field);
 
-	if (trx_id && column && trx_sys.find(nullptr, trx_id, false)) {
+	if (trx_id && column && !uncommitted
+	    && trx_sys.find(nullptr, trx_id, false)) {
 		if (!rec_get_deleted_flag(rec, 0)) {
 			return dict_load_virtual_none;
-                }
+		}
 	} else if (rec_get_deleted_flag(rec, 0)) {
 		ut_ad(trx_id != 0);
 		return dict_load_virtual_del;
@@ -1292,28 +1278,25 @@ err_len:
 	return(NULL);
 }
 
-/********************************************************************//**
-Loads definitions for table columns. */
-static
-void
-dict_load_columns(
-/*==============*/
-	dict_table_t*	table,	/*!< in/out: table */
-	mem_heap_t*	heap)	/*!< in/out: memory heap
-				for temporary storage */
+/** Load the definitions for table columns.
+@param table           table
+@param use_uncommitted 0=READ COMMITTED, 1=detect, 2=READ UNCOMMITTED
+@param heap            memory heap for temporary storage
+@return error code
+@retval DB_SUCCESS on success
+@retval DB_SUCCESS_LOCKED_REC on success if use_uncommitted=1
+and instant ADD/DROP/reorder was detected */
+MY_ATTRIBUTE((nonnull, warn_unused_result))
+static dberr_t dict_load_columns(dict_table_t *table, unsigned use_uncommitted,
+                                 mem_heap_t *heap)
 {
 	btr_pcur_t	pcur;
-	dtuple_t*	tuple;
-	dfield_t*	dfield;
-	const rec_t*	rec;
-	byte*		buf;
-	ulint		i;
 	mtr_t		mtr;
 	ulint		n_skipped = 0;
 
 	ut_ad(dict_sys.locked());
 
-	mtr_start(&mtr);
+	mtr.start();
 
 	dict_index_t* sys_index = dict_sys.sys_columns->indexes.start;
 	ut_ad(!dict_sys.sys_columns->not_redundant());
@@ -1323,32 +1306,39 @@ dict_load_columns(
 	ut_ad(name_of_col_is(dict_sys.sys_columns, sys_index,
 			     DICT_FLD__SYS_COLUMNS__PREC, "PREC"));
 
-	tuple = dtuple_create(heap, 1);
-	dfield = dtuple_get_nth_field(tuple, 0);
+	dfield_t dfield;
+	dtuple_t tuple{
+		0,1,1,&dfield,0,nullptr
+#ifdef UNIV_DEBUG
+		, DATA_TUPLE_MAGIC_N
+#endif
+	};
+	byte table_id[8];
+	mach_write_to_8(table_id, table->id);
+	dfield_set_data(&dfield, table_id, 8);
+	dict_index_copy_types(&tuple, sys_index, 1);
+	pcur.btr_cur.page_cur.index = sys_index;
 
-	buf = static_cast<byte*>(mem_heap_alloc(heap, 8));
-	mach_write_to_8(buf, table->id);
-
-	dfield_set_data(dfield, buf, 8);
-	dict_index_copy_types(tuple, sys_index, 1);
-
-	btr_pcur_open_on_user_rec(sys_index, tuple, PAGE_CUR_GE,
-				  BTR_SEARCH_LEAF, &pcur, &mtr);
+	dberr_t err = btr_pcur_open_on_user_rec(&tuple,
+						BTR_SEARCH_LEAF, &pcur, &mtr);
+	if (err != DB_SUCCESS) {
+		goto func_exit;
+	}
 
 	ut_ad(table->n_t_cols == static_cast<ulint>(
 	      table->n_cols) + static_cast<ulint>(table->n_v_cols));
 
-	for (i = 0;
+	for (ulint i = 0;
 	     i + DATA_N_SYS_COLS < table->n_t_cols + n_skipped;
 	     i++) {
 		const char*	err_msg;
 		const char*	name = NULL;
 		ulint		nth_v_col = ULINT_UNDEFINED;
-
-		rec = btr_pcur_get_rec(&pcur);
+		const rec_t*	rec = btr_pcur_get_rec(&pcur);
 
 		err_msg = btr_pcur_is_on_user_rec(&pcur)
-			? dict_load_column_low(table, heap, NULL, NULL,
+			? dict_load_column_low(table, use_uncommitted,
+					       heap, NULL, NULL,
 					       &name, rec, &mtr, &nth_v_col)
 			: dict_load_column_none;
 
@@ -1356,12 +1346,17 @@ dict_load_columns(
 		} else if (err_msg == dict_load_column_del) {
 			n_skipped++;
 			goto next_rec;
+		} else if (err_msg == dict_load_column_instant) {
+			err = DB_SUCCESS_LOCKED_REC;
+			goto func_exit;
 		} else if (err_msg == dict_load_column_none
 			   && strstr(table->name.m_name,
 				     "/" TEMP_FILE_PREFIX_INNODB)) {
 			break;
 		} else {
-			ib::fatal() << err_msg << " for table " << table->name;
+			ib::error() << err_msg << " for table " << table->name;
+			err = DB_CORRUPTION;
+			goto func_exit;
 		}
 
 		/* Note: Currently we have one DOC_ID column that is
@@ -1381,6 +1376,8 @@ dict_load_columns(
 			the flag is set before the table is created. */
 			if (table->fts == NULL) {
 				table->fts = fts_create(table);
+				table->fts->cache = fts_cache_create(table);
+				DICT_TF2_FLAG_SET(table, DICT_TF2_FTS_AUX_HEX_NAME);
 			}
 
 			ut_a(table->fts->doc_col == ULINT_UNDEFINED);
@@ -1402,40 +1399,33 @@ next_rec:
 		btr_pcur_move_to_next_user_rec(&pcur, &mtr);
 	}
 
-	btr_pcur_close(&pcur);
-	mtr_commit(&mtr);
+func_exit:
+	mtr.commit();
+	return err;
 }
 
 /** Loads SYS_VIRTUAL info for one virtual column
-@param[in,out]	table		table
-@param[in]	nth_v_col	virtual column sequence num
-@param[in,out]	v_col		virtual column
-@param[in,out]	heap		memory heap
-*/
+@param table	   table definition
+@param uncommitted false=READ COMMITTED, true=READ UNCOMMITTED
+@param nth_v_col   virtual column position */
+MY_ATTRIBUTE((nonnull, warn_unused_result))
 static
-void
-dict_load_virtual_one_col(
-	dict_table_t*	table,
-	ulint		nth_v_col,
-	dict_v_col_t*	v_col,
-	mem_heap_t*	heap)
+dberr_t
+dict_load_virtual_col(dict_table_t *table, bool uncommitted, ulint nth_v_col)
 {
+	const dict_v_col_t* v_col = dict_table_get_nth_v_col(table, nth_v_col);
+
+	if (v_col->num_base == 0) {
+		return DB_SUCCESS;
+	}
+
 	dict_index_t*	sys_virtual_index;
 	btr_pcur_t	pcur;
-	dtuple_t*	tuple;
-	dfield_t*	dfield;
-	byte*		buf;
-	ulint		i = 0;
 	mtr_t		mtr;
-	ulint		skipped = 0;
 
 	ut_ad(dict_sys.locked());
 
-	if (v_col->num_base == 0) {
-		return;
-	}
-
-	mtr_start(&mtr);
+	mtr.start();
 
 	sys_virtual_index = dict_sys.sys_virtual->indexes.start;
 	ut_ad(!dict_sys.sys_virtual->not_redundant());
@@ -1443,35 +1433,35 @@ dict_load_virtual_one_col(
 	ut_ad(name_of_col_is(dict_sys.sys_virtual, sys_virtual_index,
 			     DICT_FLD__SYS_VIRTUAL__POS, "POS"));
 
-	tuple = dtuple_create(heap, 2);
+	dfield_t dfield[2];
+	dtuple_t tuple{
+		0,2,2,dfield,0,nullptr
+#ifdef UNIV_DEBUG
+		, DATA_TUPLE_MAGIC_N
+#endif
+	};
+	byte table_id[8], vcol_pos[4];
+	mach_write_to_8(table_id, table->id);
+	dfield_set_data(&dfield[0], table_id, 8);
+	mach_write_to_4(vcol_pos,
+			dict_create_v_col_pos(nth_v_col, v_col->m_col.ind));
+	dfield_set_data(&dfield[1], vcol_pos, 4);
 
-	/* table ID field */
-	dfield = dtuple_get_nth_field(tuple, 0);
+	dict_index_copy_types(&tuple, sys_virtual_index, 2);
+	pcur.btr_cur.page_cur.index = sys_virtual_index;
 
-	buf = static_cast<byte*>(mem_heap_alloc(heap, 8));
-	mach_write_to_8(buf, table->id);
+	dberr_t err = btr_pcur_open_on_user_rec(&tuple,
+						BTR_SEARCH_LEAF, &pcur, &mtr);
+	if (err != DB_SUCCESS) {
+		goto func_exit;
+	}
 
-	dfield_set_data(dfield, buf, 8);
-
-	/* virtual column pos field */
-	dfield = dtuple_get_nth_field(tuple, 1);
-
-	buf = static_cast<byte*>(mem_heap_alloc(heap, 4));
-	ulint	vcol_pos = dict_create_v_col_pos(nth_v_col, v_col->m_col.ind);
-	mach_write_to_4(buf, vcol_pos);
-
-	dfield_set_data(dfield, buf, 4);
-
-	dict_index_copy_types(tuple, sys_virtual_index, 2);
-
-	btr_pcur_open_on_user_rec(sys_virtual_index, tuple, PAGE_CUR_GE,
-				  BTR_SEARCH_LEAF, &pcur, &mtr);
-
-	for (i = 0; i < unsigned{v_col->num_base} + skipped; i++) {
+	for (ulint i = 0, skipped = 0;
+	     i < unsigned{v_col->num_base} + skipped; i++) {
 		ulint		pos;
 		const char*	err_msg
 			= btr_pcur_is_on_user_rec(&pcur)
-			? dict_load_virtual_low(table,
+			? dict_load_virtual_low(table, uncommitted,
 						&v_col->base_col[i - skipped],
 						NULL,
 					        &pos, NULL,
@@ -1479,7 +1469,7 @@ dict_load_virtual_one_col(
 			: dict_load_virtual_none;
 
 		if (!err_msg) {
-			ut_ad(pos == vcol_pos);
+			ut_ad(pos == mach_read_from_4(vcol_pos));
 		} else if (err_msg == dict_load_virtual_del) {
 			skipped++;
 		} else if (err_msg == dict_load_virtual_none
@@ -1487,31 +1477,29 @@ dict_load_virtual_one_col(
 				     "/" TEMP_FILE_PREFIX_INNODB)) {
 			break;
 		} else {
-			ib::fatal() << err_msg << " for table " << table->name;
+			ib::error() << err_msg << " for table " << table->name;
+			err = DB_CORRUPTION;
+			break;
 		}
 
 		btr_pcur_move_to_next_user_rec(&pcur, &mtr);
 	}
 
-	btr_pcur_close(&pcur);
-	mtr_commit(&mtr);
+func_exit:
+	mtr.commit();
+	return err;
 }
 
 /** Loads info from SYS_VIRTUAL for virtual columns.
-@param[in,out]	table	table
-@param[in]	heap	memory heap
-*/
-static
-void
-dict_load_virtual(
-	dict_table_t*	table,
-	mem_heap_t*	heap)
+@param table	   table definition
+@param uncommitted false=READ COMMITTED, true=READ UNCOMMITTED */
+MY_ATTRIBUTE((nonnull, warn_unused_result))
+static dberr_t dict_load_virtual(dict_table_t *table, bool uncommitted)
 {
-	for (ulint i = 0; i < table->n_v_cols; i++) {
-		dict_v_col_t*	v_col = dict_table_get_nth_v_col(table, i);
-
-		dict_load_virtual_one_col(table, i, v_col, heap);
-	}
+  for (ulint i= 0; i < table->n_v_cols; i++)
+    if (dberr_t err= dict_load_virtual_col(table, uncommitted, i))
+      return err;
+  return DB_SUCCESS;
 }
 
 /** Error message for a delete-marked record in dict_load_field_low() */
@@ -1528,6 +1516,8 @@ dict_load_field_low(
 	byte*		index_id,	/*!< in/out: index id (8 bytes)
 					an "in" value if index != NULL
 					and "out" if index == NULL */
+	bool		uncommitted,	/*!< in: false=READ COMMITTED,
+					true=READ UNCOMMITTED */
 	dict_index_t*	index,		/*!< in/out: index, could be NULL
 					if we just populate a dict_field_t
 					struct with information from
@@ -1622,7 +1612,8 @@ err_len:
 
 	if (!trx_id) {
 		ut_ad(!rec_get_deleted_flag(rec, 0));
-	} else if (mtr && trx_sys.find(nullptr, trx_id, false)) {
+	} else if (!mtr || uncommitted) {
+	} else if (trx_sys.find(nullptr, trx_id, false)) {
 		const auto savepoint = mtr->get_savepoint();
 		dict_index_t* sys_field = UT_LIST_GET_FIRST(
 			dict_sys.sys_fields->indexes);
@@ -1664,47 +1655,51 @@ err_len:
 	return(NULL);
 }
 
-/********************************************************************//**
-Loads definitions for index fields.
-@return DB_SUCCESS if ok, DB_CORRUPTION if corruption */
-static
-ulint
-dict_load_fields(
-/*=============*/
-	dict_index_t*	index,	/*!< in/out: index whose fields to load */
-	mem_heap_t*	heap)	/*!< in: memory heap for temporary storage */
+/**
+Load definitions for index fields.
+@param index       index whose fields are to be loaded
+@param uncommitted false=READ COMMITTED, true=READ UNCOMMITTED
+@param heap        memory heap for temporary storage
+@return error code
+@return DB_SUCCESS if the fields were loaded successfully */
+static dberr_t dict_load_fields(dict_index_t *index, bool uncommitted,
+                                mem_heap_t *heap)
 {
 	btr_pcur_t	pcur;
-	dtuple_t*	tuple;
-	dfield_t*	dfield;
-	byte*		buf;
-	ulint		i;
 	mtr_t		mtr;
-	dberr_t		error;
 
 	ut_ad(dict_sys.locked());
 
-	mtr_start(&mtr);
+	mtr.start();
 
 	dict_index_t* sys_index = dict_sys.sys_fields->indexes.start;
 	ut_ad(!dict_sys.sys_fields->not_redundant());
 	ut_ad(name_of_col_is(dict_sys.sys_fields, sys_index,
 			     DICT_FLD__SYS_FIELDS__COL_NAME, "COL_NAME"));
 
-	tuple = dtuple_create(heap, 1);
-	dfield = dtuple_get_nth_field(tuple, 0);
+	dfield_t dfield;
+	dtuple_t tuple{
+		0,1,1,&dfield,0,nullptr
+#ifdef UNIV_DEBUG
+		, DATA_TUPLE_MAGIC_N
+#endif
+	};
+	byte index_id[8];
+	mach_write_to_8(index_id, index->id);
+	dfield_set_data(&dfield, index_id, 8);
+	dict_index_copy_types(&tuple, sys_index, 1);
+	pcur.btr_cur.page_cur.index = sys_index;
 
-	buf = static_cast<byte*>(mem_heap_alloc(heap, 8));
-	mach_write_to_8(buf, index->id);
+	dberr_t error = btr_pcur_open_on_user_rec(&tuple, BTR_SEARCH_LEAF,
+						  &pcur, &mtr);
+	if (error != DB_SUCCESS) {
+		goto func_exit;
+	}
 
-	dfield_set_data(dfield, buf, 8);
-	dict_index_copy_types(tuple, sys_index, 1);
-
-	btr_pcur_open_on_user_rec(sys_index, tuple, PAGE_CUR_GE,
-				  BTR_SEARCH_LEAF, &pcur, &mtr);
-	for (i = 0; i < index->n_fields; i++) {
+	for (ulint i = 0; i < index->n_fields; i++) {
 		const char *err_msg = btr_pcur_is_on_user_rec(&pcur)
-			? dict_load_field_low(buf, index, NULL, NULL, NULL,
+			? dict_load_field_low(index_id, uncommitted, index,
+					      nullptr, nullptr, nullptr,
 					      heap, &mtr,
 					      btr_pcur_get_rec(&pcur))
 			: dict_load_field_none;
@@ -1724,17 +1719,15 @@ dict_load_fields(
 					    << index->table->name;
 			}
 			error = DB_CORRUPTION;
-			goto func_exit;
+			break;
 		}
 
 		btr_pcur_move_to_next_user_rec(&pcur, &mtr);
 	}
 
-	error = DB_SUCCESS;
 func_exit:
-	btr_pcur_close(&pcur);
-	mtr_commit(&mtr);
-	return(error);
+	mtr.commit();
+	return error;
 }
 
 /** Error message for a delete-marked record in dict_load_index_low() */
@@ -1753,6 +1746,8 @@ dict_load_index_low(
 	byte*		table_id,	/*!< in/out: table id (8 bytes),
 					an "in" value if mtr
 					and "out" when !mtr */
+	bool		uncommitted,	/*!< in: false=READ COMMITTED,
+					true=READ UNCOMMITTED */
 	mem_heap_t*	heap,		/*!< in/out: temporary memory heap */
 	const rec_t*	rec,		/*!< in: SYS_INDEXES record */
 	mtr_t*		mtr,		/*!< in/out: mini-transaction,
@@ -1834,7 +1829,7 @@ err_len:
 	const trx_id_t trx_id = trx_read_trx_id(field);
 	if (!trx_id) {
 		ut_ad(!rec_get_deleted_flag(rec, 0));
-	} else if (!mtr) {
+	} else if (!mtr || uncommitted) {
 	} else if (trx_sys.find(nullptr, trx_id, false)) {
 		const auto savepoint = mtr->get_savepoint();
 		dict_index_t* sys_index = UT_LIST_GET_FIRST(
@@ -1912,33 +1907,27 @@ err_len:
 	return(NULL);
 }
 
-/********************************************************************//**
-Loads definitions for table indexes. Adds them to the data dictionary
-cache.
-@return DB_SUCCESS if ok, DB_CORRUPTION if corruption of dictionary
-table or DB_UNSUPPORTED if table has unknown index type */
+/** Load definitions for table indexes. Adds them to the data dictionary cache.
+@param table       table definition
+@param uncommitted false=READ COMMITTED, true=READ UNCOMMITTED
+@param heap        memory heap for temporary storage
+@param ignore_err  errors to be ignored when loading the index definition
+@return error code
+@retval DB_SUCCESS if all indexes were successfully loaded
+@retval DB_CORRUPTION if corruption of dictionary table
+@retval DB_UNSUPPORTED if table has unknown index type */
 static MY_ATTRIBUTE((nonnull))
-dberr_t
-dict_load_indexes(
-/*==============*/
-	dict_table_t*	table,	/*!< in/out: table */
-	mem_heap_t*	heap,	/*!< in: memory heap for temporary storage */
-	dict_err_ignore_t ignore_err)
-				/*!< in: error to be ignored when
-				loading the index definition */
+dberr_t dict_load_indexes(dict_table_t *table, bool uncommitted,
+                          mem_heap_t *heap, dict_err_ignore_t ignore_err)
 {
 	dict_index_t*	sys_index;
 	btr_pcur_t	pcur;
-	dtuple_t*	tuple;
-	dfield_t*	dfield;
-	const rec_t*	rec;
-	byte		buf[8];
+	byte		table_id[8];
 	mtr_t		mtr;
-	dberr_t		error = DB_SUCCESS;
 
 	ut_ad(dict_sys.locked());
 
-	mtr_start(&mtr);
+	mtr.start();
 
 	sys_index = dict_sys.sys_indexes->indexes.start;
 	ut_ad(!dict_sys.sys_indexes->not_redundant());
@@ -1947,21 +1936,28 @@ dict_load_indexes(
 	ut_ad(name_of_col_is(dict_sys.sys_indexes, sys_index,
 			     DICT_FLD__SYS_INDEXES__PAGE_NO, "PAGE_NO"));
 
-	tuple = dtuple_create(heap, 1);
-	dfield = dtuple_get_nth_field(tuple, 0);
+	dfield_t dfield;
+	dtuple_t tuple{
+		0,1,1,&dfield,0,nullptr
+#ifdef UNIV_DEBUG
+		, DATA_TUPLE_MAGIC_N
+#endif
+	};
+	mach_write_to_8(table_id, table->id);
+	dfield_set_data(&dfield, table_id, 8);
+	dict_index_copy_types(&tuple, sys_index, 1);
+	pcur.btr_cur.page_cur.index = sys_index;
 
-	mach_write_to_8(buf, table->id);
+	dberr_t error = btr_pcur_open_on_user_rec(&tuple, BTR_SEARCH_LEAF,
+						  &pcur, &mtr);
+	if (error != DB_SUCCESS) {
+		goto func_exit;
+	}
 
-	dfield_set_data(dfield, buf, 8);
-	dict_index_copy_types(tuple, sys_index, 1);
-
-	btr_pcur_open_on_user_rec(sys_index, tuple, PAGE_CUR_GE,
-				  BTR_SEARCH_LEAF, &pcur, &mtr);
 	while (btr_pcur_is_on_user_rec(&pcur)) {
 		dict_index_t*	index = NULL;
 		const char*	err_msg;
-
-		rec = btr_pcur_get_rec(&pcur);
+		const rec_t*	rec = btr_pcur_get_rec(&pcur);
 		if ((ignore_err & DICT_ERR_IGNORE_RECOVER_LOCK)
 		    && (rec_get_n_fields_old(rec)
 			== DICT_NUM_FIELDS__SYS_INDEXES
@@ -1985,8 +1981,8 @@ dict_load_indexes(
 			}
 		}
 
-		err_msg = dict_load_index_low(buf, heap, rec, &mtr, table,
-					      &index);
+		err_msg = dict_load_index_low(table_id, uncommitted, heap, rec,
+					      &mtr, table, &index);
 		ut_ad(!index == !!err_msg);
 
 		if (err_msg == dict_load_index_none) {
@@ -2006,6 +2002,7 @@ dict_load_indexes(
 			goto func_exit;
 		} else if (rec[8 + 8 + DATA_TRX_ID_LEN + DATA_ROLL_PTR_LEN]
 			   == static_cast<byte>(*TEMP_INDEX_PREFIX_STR)) {
+			dict_mem_index_free(index);
 			goto next_rec;
 		} else {
 			const trx_id_t id = trx_read_trx_id(rec + 8 + 8);
@@ -2021,7 +2018,7 @@ dict_load_indexes(
 		if (ignore_err != DICT_ERR_IGNORE_DROP
 		    && index->is_corrupted() && index->is_clust()) {
 			dict_mem_index_free(index);
-			error = DB_INDEX_CORRUPT;
+			error = DB_TABLE_CORRUPT;
 			goto func_exit;
 		}
 
@@ -2048,7 +2045,8 @@ dict_load_indexes(
 		} else if (index->page == FIL_NULL
 			   && table->is_readable()
 			   && (!(index->type & DICT_FTS))) {
-			if (ignore_err != DICT_ERR_IGNORE_DROP) {
+			if (!uncommitted
+			    && ignore_err != DICT_ERR_IGNORE_DROP) {
 				ib::error_or_warn(!(ignore_err
 						    & DICT_ERR_IGNORE_INDEX))
 					<< "Index " << index->name
@@ -2070,7 +2068,11 @@ corrupted:
 			dictionary cache for such metadata corruption,
 			since we would always be able to set it
 			when loading the dictionary cache */
-			dict_set_corrupted_index_cache_only(index);
+			if (index->is_clust()) {
+				index->table->corrupted = true;
+				index->table->file_unreadable = true;
+			}
+			index->type |= DICT_CORRUPT;
 		} else if (!dict_index_is_clust(index)
 			   && NULL == dict_table_get_first_index(table)) {
 
@@ -2088,7 +2090,10 @@ corrupted:
 			of the database server */
 			dict_mem_index_free(index);
 		} else {
-			dict_load_fields(index, heap);
+			error = dict_load_fields(index, uncommitted, heap);
+			if (error != DB_SUCCESS) {
+				goto func_exit;
+			}
 
 			/* The data dictionary tables should never contain
 			invalid index definitions.  If we ignored this error
@@ -2128,8 +2133,11 @@ next_rec:
 	ut_ad(table->fts_doc_id_index == NULL);
 
 	if (table->fts != NULL) {
-		table->fts_doc_id_index = dict_table_get_index_on_name(
+		dict_index_t *idx = dict_table_get_index_on_name(
 			table, FTS_DOC_ID_INDEX_NAME);
+		if (idx && dict_index_is_unique(idx)) {
+			table->fts_doc_id_index = idx;
+		}
 	}
 
 	/* If the table contains FTS indexes, populate table->fts->indexes */
@@ -2141,20 +2149,19 @@ next_rec:
 	}
 
 func_exit:
-	btr_pcur_close(&pcur);
-	mtr_commit(&mtr);
-
-	return(error);
+	mtr.commit();
+	return error;
 }
 
 /** Load a table definition from a SYS_TABLES record to dict_table_t.
 Do not load any columns or indexes.
 @param[in,out]	mtr		mini-transaction
+@param[in]	uncommitted	whether to use READ UNCOMMITTED isolation level
 @param[in]	rec		SYS_TABLES record
 @param[out,own]	table		table, or nullptr
 @return	error message
 @retval	nullptr on success */
-const char *dict_load_table_low(mtr_t *mtr,
+const char *dict_load_table_low(mtr_t *mtr, bool uncommitted,
                                 const rec_t *rec, dict_table_t **table)
 {
 	table_id_t	table_id;
@@ -2167,7 +2174,8 @@ const char *dict_load_table_low(mtr_t *mtr,
 		return(error_text);
 	}
 
-	if (auto r = dict_sys_tables_rec_read(rec, mtr, &table_id, &space_id,
+	if (auto r = dict_sys_tables_rec_read(rec, uncommitted, mtr,
+					      &table_id, &space_id,
 					      &t_num, &flags, &flags2,
 					      &trx_id)) {
 		*table = NULL;
@@ -2301,12 +2309,7 @@ static dict_table_t *dict_load_table_one(const span<const char> &name,
                                          dict_err_ignore_t ignore_err,
                                          dict_names_t &fk_tables)
 {
-	dberr_t		err;
 	btr_pcur_t	pcur;
-	dtuple_t*	tuple;
-	mem_heap_t*	heap;
-	dfield_t*	dfield;
-	const rec_t*	rec;
 	mtr_t		mtr;
 
 	DBUG_ENTER("dict_load_table_one");
@@ -2314,10 +2317,6 @@ static dict_table_t *dict_load_table_one(const span<const char> &name,
 		   ("table: %.*s", int(name.size()), name.data()));
 
 	ut_ad(dict_sys.locked());
-
-	heap = mem_heap_create(32000);
-
-	mtr_start(&mtr);
 
 	dict_index_t *sys_index = dict_sys.sys_tables->indexes.start;
 	ut_ad(!dict_sys.sys_tables->not_redundant());
@@ -2332,25 +2331,31 @@ static dict_table_t *dict_load_table_one(const span<const char> &name,
 	ut_ad(name_of_col_is(dict_sys.sys_tables, sys_index,
 			     DICT_FLD__SYS_TABLES__SPACE, "SPACE"));
 
-	tuple = dtuple_create(heap, 1);
-	dfield = dtuple_get_nth_field(tuple, 0);
+	dfield_t dfield;
+	dtuple_t tuple{
+		0,1,1,&dfield,0,nullptr
+#ifdef UNIV_DEBUG
+		, DATA_TUPLE_MAGIC_N
+#endif
+	};
+	dfield_set_data(&dfield, name.data(), name.size());
+	dict_index_copy_types(&tuple, sys_index, 1);
+	pcur.btr_cur.page_cur.index = sys_index;
 
-	dfield_set_data(dfield, name.data(), name.size());
-	dict_index_copy_types(tuple, sys_index, 1);
+	bool uncommitted = false;
+reload:
+	mtr.start();
+	dberr_t err = btr_pcur_open_on_user_rec(&tuple,
+						BTR_SEARCH_LEAF, &pcur, &mtr);
 
-	btr_pcur_open_on_user_rec(sys_index, tuple, PAGE_CUR_GE,
-				  BTR_SEARCH_LEAF, &pcur, &mtr);
-	rec = btr_pcur_get_rec(&pcur);
-
-	if (!btr_pcur_is_on_user_rec(&pcur)) {
+	if (err != DB_SUCCESS || !btr_pcur_is_on_user_rec(&pcur)) {
 		/* Not found */
 err_exit:
-		btr_pcur_close(&pcur);
-		mtr_commit(&mtr);
-		mem_heap_free(heap);
-
-		DBUG_RETURN(NULL);
+		mtr.commit();
+		DBUG_RETURN(nullptr);
 	}
+
+	const rec_t* rec = btr_pcur_get_rec(&pcur);
 
 	/* Check if the table name in record is the searched one */
 	if (rec_get_field_start_offs(rec, 1) != name.size()
@@ -2359,7 +2364,8 @@ err_exit:
 	}
 
 	dict_table_t* table;
-	if (const char* err_msg = dict_load_table_low(&mtr, rec, &table)) {
+	if (const char* err_msg =
+	    dict_load_table_low(&mtr, uncommitted, rec, &table)) {
 		if (err_msg != dict_load_table_flags) {
 			ib::error() << err_msg;
 		}
@@ -2369,14 +2375,35 @@ err_exit:
 		goto err_exit;
 	}
 
-	btr_pcur_close(&pcur);
-	mtr_commit(&mtr);
+        const unsigned use_uncommitted = uncommitted
+		? 2
+		: table->id == mach_read_from_8(
+			rec + rec_get_field_start_offs(
+				rec, DICT_FLD__SYS_TABLES__ID));
+
+	mtr.commit();
+
+	mem_heap_t* heap = mem_heap_create(32000);
 
 	dict_load_tablespace(table, ignore_err);
 
-	dict_load_columns(table, heap);
-
-	dict_load_virtual(table, heap);
+	switch (dict_load_columns(table, use_uncommitted, heap)) {
+	case DB_SUCCESS_LOCKED_REC:
+		ut_ad(!uncommitted);
+		uncommitted = true;
+		dict_mem_table_free(table);
+		mem_heap_free(heap);
+		goto reload;
+	case DB_SUCCESS:
+		if (!dict_load_virtual(table, uncommitted)) {
+			break;
+		}
+		/* fall through */
+	default:
+		dict_mem_table_free(table);
+		mem_heap_free(heap);
+		DBUG_RETURN(nullptr);
+	}
 
 	dict_table_add_system_columns(table, heap);
 
@@ -2398,9 +2425,9 @@ err_exit:
 		? DICT_ERR_IGNORE_ALL
 		: ignore_err;
 
-	err = dict_load_indexes(table, heap, index_load_err);
+	err = dict_load_indexes(table, uncommitted, heap, index_load_err);
 
-	if (err == DB_INDEX_CORRUPT || !UT_LIST_GET_FIRST(table->indexes)) {
+	if (err == DB_TABLE_CORRUPT) {
 		/* Refuse to load the table if the table has a corrupted
 		cluster index */
 		ut_ad(index_load_err != DICT_ERR_IGNORE_DROP);
@@ -2408,8 +2435,8 @@ err_exit:
 			    << table->name;
 evict:
 		dict_sys.remove(table);
-		table = NULL;
-		goto func_exit;
+		mem_heap_free(heap);
+		DBUG_RETURN(nullptr);
 	}
 
 	if (err != DB_SUCCESS || !table->is_readable()) {
@@ -2420,7 +2447,7 @@ evict:
 corrupted:
 			table->corrupted = true;
 			table->file_unreadable = true;
-			err = DB_CORRUPTION;
+			err = DB_TABLE_CORRUPT;
 		} else if (table->space->id
 			   && ignore_err == DICT_ERR_IGNORE_DROP) {
 			/* Do not bother to load data from .ibd files
@@ -2464,9 +2491,7 @@ corrupted:
 	changed when dict_load_foreigns() is called below */
 	table->fk_max_recusive_level = 0;
 
-	/* If the force recovery flag is set, we open the table irrespective
-	of the error condition, since the user may want to dump data from the
-	clustered index. However we load the foreign key information only if
+	/* We will load the foreign key information only if
 	all indexes were loaded. */
 	if (!table->is_readable()) {
 		/* Don't attempt to load the indexes from disk. */
@@ -2486,7 +2511,6 @@ corrupted:
 		}
 	}
 
-func_exit:
 	mem_heap_free(heap);
 
 	ut_ad(!table
@@ -2501,7 +2525,8 @@ func_exit:
 			/* the table->fts could be created in dict_load_column
 			when a user defined FTS_DOC_ID is present, but no
 			FTS */
-			fts_free(table);
+			table->fts->~fts_t();
+			table->fts = nullptr;
 		} else if (fts_optimize_wq) {
 			fts_optimize_add_table(table);
 		} else if (table->can_be_evicted) {
@@ -2575,18 +2600,17 @@ dict_load_table_on_id(
 	mach_write_to_8(id_buf, table_id);
 	dfield_set_data(&dfield, id_buf, 8);
 	dict_index_copy_types(&tuple, sys_table_ids, 1);
+	pcur.btr_cur.page_cur.index = sys_table_ids;
 
-	btr_pcur_open_on_user_rec(sys_table_ids, &tuple, PAGE_CUR_GE,
-				  BTR_SEARCH_LEAF, &pcur, &mtr);
-
-
-	const rec_t* rec = btr_pcur_get_rec(&pcur);
 	dict_table_t* table = nullptr;
 
-	if (page_rec_is_user_rec(rec)) {
+	if (btr_pcur_open_on_user_rec(&tuple, BTR_SEARCH_LEAF, &pcur, &mtr)
+	    == DB_SUCCESS
+	    && btr_pcur_is_on_user_rec(&pcur)) {
 		/*---------------------------------------------------*/
 		/* Now we have the record in the secondary index
 		containing the table ID and NAME */
+		const rec_t* rec = btr_pcur_get_rec(&pcur);
 check_rec:
 		field = rec_get_nth_field_old(
 			rec, DICT_FLD__SYS_TABLE_IDS__ID, &len);
@@ -2615,10 +2639,8 @@ check_rec:
 		}
 	}
 
-	btr_pcur_close(&pcur);
 	mtr.commit();
-
-	return(table);
+	return table;
 }
 
 /********************************************************************//**
@@ -2636,11 +2658,12 @@ dict_load_sys_table(
 
 	heap = mem_heap_create(1000);
 
-	dict_load_indexes(table, heap, DICT_ERR_IGNORE_NONE);
+	dict_load_indexes(table, false, heap, DICT_ERR_IGNORE_NONE);
 
 	mem_heap_free(heap);
 }
 
+MY_ATTRIBUTE((nonnull, warn_unused_result))
 /********************************************************************//**
 Loads foreign key constraint col names (also for the referenced table).
 Members that must be set (and valid) in foreign:
@@ -2651,15 +2674,9 @@ Members that will be created and set by this function:
 foreign->foreign_col_names[i]
 foreign->referenced_col_names[i]
 (for i=0..foreign->n_fields-1) */
-static void dict_load_foreign_cols(dict_foreign_t *foreign, trx_id_t trx_id)
+static dberr_t dict_load_foreign_cols(dict_foreign_t *foreign, trx_id_t trx_id)
 {
 	btr_pcur_t	pcur;
-	dtuple_t*	tuple;
-	dfield_t*	dfield;
-	const rec_t*	rec;
-	const byte*	field;
-	ulint		len;
-	ulint		i;
 	mtr_t		mtr;
 	size_t		id_len;
 
@@ -2675,27 +2692,35 @@ static void dict_load_foreign_cols(dict_foreign_t *foreign, trx_id_t trx_id)
 		mem_heap_alloc(foreign->heap,
 			       foreign->n_fields * sizeof(void*)));
 
-	mtr_start(&mtr);
+	mtr.start();
 
 	dict_index_t* sys_index = dict_sys.sys_foreign_cols->indexes.start;
 	ut_ad(!dict_sys.sys_foreign_cols->not_redundant());
 
-	tuple = dtuple_create(foreign->heap, 1);
-	dfield = dtuple_get_nth_field(tuple, 0);
+	dfield_t dfield;
+	dtuple_t tuple{
+		0,1,1,&dfield,0,nullptr
+#ifdef UNIV_DEBUG
+		, DATA_TUPLE_MAGIC_N
+#endif
+	};
 
-	dfield_set_data(dfield, foreign->id, id_len);
-	dict_index_copy_types(tuple, sys_index, 1);
+	dfield_set_data(&dfield, foreign->id, id_len);
+	dict_index_copy_types(&tuple, sys_index, 1);
+	pcur.btr_cur.page_cur.index = sys_index;
 
 	mem_heap_t* heap = nullptr;
-	btr_pcur_open_on_user_rec(sys_index, tuple, PAGE_CUR_GE,
-				  BTR_SEARCH_LEAF, &pcur, &mtr);
-	for (i = 0; i < foreign->n_fields; i++) {
-retry:
+	dberr_t err = btr_pcur_open_on_user_rec(&tuple,
+						BTR_SEARCH_LEAF, &pcur, &mtr);
+	if (err != DB_SUCCESS) {
+		goto func_exit;
+	}
+	for (ulint i = 0; i < foreign->n_fields; i++) {
 		ut_a(btr_pcur_is_on_user_rec(&pcur));
 
-		rec = btr_pcur_get_rec(&pcur);
-
-		field = rec_get_nth_field_old(
+		const rec_t* rec = btr_pcur_get_rec(&pcur);
+		ulint len;
+		const byte* field = rec_get_nth_field_old(
 			rec, DICT_FLD__SYS_FOREIGN_COLS__DB_TRX_ID, &len);
 		ut_a(len == DATA_TRX_ID_LEN);
 
@@ -2723,9 +2748,7 @@ retry:
 
 		if (rec_get_deleted_flag(rec, 0)) {
 			ut_ad(id);
-next:
-			btr_pcur_move_to_next_user_rec(&pcur, &mtr);
-			goto retry;
+			goto next;
 		}
 
 		field = rec_get_nth_field_old(
@@ -2751,7 +2774,7 @@ next:
 				rec, DICT_FLD__SYS_FOREIGN_COLS__REF_COL_NAME,
 				&ref_col_name_len);
 
-			ib::fatal	sout;
+			ib::error	sout;
 
 			sout << "Unable to load column names for foreign"
 				" key '" << foreign->id
@@ -2766,6 +2789,9 @@ next:
 			sout << "', REF_COL_NAME='";
 			sout.write(ref_col_name, ref_col_name_len);
 			sout << "')";
+
+			err = DB_CORRUPTION;
+			break;
 		}
 
 		field = rec_get_nth_field_old(
@@ -2783,14 +2809,15 @@ next:
 		foreign->referenced_col_names[i] = mem_heap_strdupl(
 			foreign->heap, (char*) field, len);
 
+next:
 		btr_pcur_move_to_next_user_rec(&pcur, &mtr);
 	}
-
-	btr_pcur_close(&pcur);
+func_exit:
 	mtr.commit();
 	if (UNIV_LIKELY_NULL(heap)) {
 		mem_heap_free(heap);
 	}
+	return err;
 }
 
 /***********************************************************************//**
@@ -2802,6 +2829,8 @@ dberr_t
 dict_load_foreign(
 /*==============*/
 	const char*		table_name,	/*!< in: table name */
+	bool			uncommitted,	/*!< in: use READ UNCOMMITTED
+						transaction isolation level */
 	const char**		col_names,
 				/*!< in: column names, or NULL
 				to use foreign->foreign_table->col_names */
@@ -2833,7 +2862,6 @@ dict_load_foreign(
 	mtr_t		mtr;
 	dict_table_t*	for_table;
 	dict_table_t*	ref_table;
-        byte		dtuple_buf[DTUPLE_EST_ALLOC(1)];
 
 	DBUG_ENTER("dict_load_foreign");
 	DBUG_PRINT("dict_load_foreign",
@@ -2845,28 +2873,38 @@ dict_load_foreign(
 	dict_index_t* sys_index = dict_sys.sys_foreign->indexes.start;
 	ut_ad(!dict_sys.sys_foreign->not_redundant());
 
-	dtuple_t* tuple = dtuple_create_from_mem(dtuple_buf, sizeof dtuple_buf,
-                                                 1, 0);
-	dfield_set_data(dtuple_get_nth_field(tuple, 0), id.data(), id.size());
-	dict_index_copy_types(tuple, sys_index, 1);
+	dfield_t dfield;
+	dtuple_t tuple{
+		0,1,1,&dfield,0,nullptr
+#ifdef UNIV_DEBUG
+		, DATA_TUPLE_MAGIC_N
+#endif
+	};
+	dfield_set_data(&dfield, id.data(), id.size());
+	dict_index_copy_types(&tuple, sys_index, 1);
+	pcur.btr_cur.page_cur.index = sys_index;
 
 	mtr.start();
 
-	btr_pcur_open_on_user_rec(sys_index, tuple, PAGE_CUR_GE,
-				  BTR_SEARCH_LEAF, &pcur, &mtr);
-	const rec_t* rec = btr_pcur_get_rec(&pcur);
 	mem_heap_t* heap = nullptr;
+	dberr_t err = btr_pcur_open_on_user_rec(&tuple,
+						BTR_SEARCH_LEAF, &pcur, &mtr);
+	if (err != DB_SUCCESS) {
+		goto err_exit;
+	}
 
 	if (!btr_pcur_is_on_user_rec(&pcur)) {
-	not_found:
-		btr_pcur_close(&pcur);
+not_found:
+		err = DB_NOT_FOUND;
+err_exit:
 		mtr.commit();
 		if (UNIV_LIKELY_NULL(heap)) {
 			mem_heap_free(heap);
 		}
-		DBUG_RETURN(DB_NOT_FOUND);
+		DBUG_RETURN(err);
 	}
 
+	const rec_t* rec = btr_pcur_get_rec(&pcur);
 	static_assert(DICT_FLD__SYS_FOREIGN__ID == 0, "compatibility");
 	field = rec_get_nth_field_old(rec, DICT_FLD__SYS_FOREIGN__ID, &len);
 
@@ -2881,7 +2919,8 @@ dict_load_foreign(
 
 	const trx_id_t tid = trx_read_trx_id(field);
 
-	if (tid && tid != trx_id && trx_sys.find(nullptr, tid, false)) {
+	if (tid && tid != trx_id && !uncommitted
+	    && trx_sys.find(nullptr, tid, false)) {
 		const auto savepoint = mtr.get_savepoint();
 		rec_offs* offsets = rec_get_offsets(
 			rec, sys_index, nullptr, true, ULINT_UNDEFINED, &heap);
@@ -2947,13 +2986,15 @@ dict_load_foreign(
 		foreign->heap, (const char*) field, len);
 	dict_mem_referenced_table_name_lookup_set(foreign, TRUE);
 
-	btr_pcur_close(&pcur);
 	mtr.commit();
 	if (UNIV_LIKELY_NULL(heap)) {
 		mem_heap_free(heap);
 	}
 
-	dict_load_foreign_cols(foreign, trx_id);
+	err = dict_load_foreign_cols(foreign, trx_id);
+	if (err != DB_SUCCESS) {
+		goto load_error;
+	}
 
 	ref_table = dict_sys.find_table(
 		{foreign->referenced_table_name_lookup,
@@ -2973,9 +3014,9 @@ dict_load_foreign(
 			mem_heap_strdupl(ref_table->heap,
 					 foreign->foreign_table_name_lookup,
 					 foreign_table_name_len));
-
+load_error:
 		dict_foreign_remove_from_cache(foreign);
-		DBUG_RETURN(DB_SUCCESS);
+		DBUG_RETURN(err);
 	}
 
 	ut_a(for_table || ref_table);
@@ -3021,11 +3062,7 @@ dict_load_foreigns(
 						subsequently to load all the
 						foreign key constraints. */
 {
-	ulint		tuple_buf[(DTUPLE_EST_ALLOC(1) + sizeof(ulint) - 1)
-				/ sizeof(ulint)];
 	btr_pcur_t	pcur;
-	dtuple_t*	tuple;
-	dfield_t*	dfield;
 	mtr_t		mtr;
 
 	DBUG_ENTER("dict_load_foreigns");
@@ -3047,18 +3084,25 @@ dict_load_foreigns(
 		dict_table_get_first_index(dict_sys.sys_foreign));
 	ut_ad(!strcmp(sec_index->fields[0].name, "FOR_NAME"));
 	bool check_recursive = !trx_id;
+	dfield_t dfield;
+	dtuple_t tuple{
+		0,1,1,&dfield,0,nullptr
+#ifdef UNIV_DEBUG
+		, DATA_TUPLE_MAGIC_N
+#endif
+	};
 
 start_load:
 	mtr.start();
+	dfield_set_data(&dfield, table_name, strlen(table_name));
+	dict_index_copy_types(&tuple, sec_index, 1);
+	pcur.btr_cur.page_cur.index = sec_index;
 
-	tuple = dtuple_create_from_mem(tuple_buf, sizeof(tuple_buf), 1, 0);
-	dfield = dtuple_get_nth_field(tuple, 0);
-
-	dfield_set_data(dfield, table_name, strlen(table_name));
-	dict_index_copy_types(tuple, sec_index, 1);
-
-	btr_pcur_open_on_user_rec(sec_index, tuple, PAGE_CUR_GE,
-				  BTR_SEARCH_LEAF, &pcur, &mtr);
+	dberr_t err = btr_pcur_open_on_user_rec(&tuple,
+						BTR_SEARCH_LEAF, &pcur, &mtr);
+	if (err != DB_SUCCESS) {
+		DBUG_RETURN(err);
+	}
 loop:
 	const rec_t* rec = btr_pcur_get_rec(&pcur);
 	const byte* field;
@@ -3081,11 +3125,11 @@ loop:
 	following call does the comparison in the latin1_swedish_ci
 	charset-collation, in a case-insensitive way. */
 
-	if (cmp_data(dfield_get_type(dfield)->mtype,
-		     dfield_get_type(dfield)->prtype,
+	if (cmp_data(dfield_get_type(&dfield)->mtype,
+		     dfield_get_type(&dfield)->prtype,
 		     false,
-		     static_cast<const byte*>(dfield_get_data(dfield)),
-		     dfield_get_len(dfield),
+		     reinterpret_cast<const byte*>(table_name),
+		     dfield_get_len(&dfield),
 		     field, len)) {
 		goto load_next_index;
 	}
@@ -3106,11 +3150,12 @@ loop:
 		rec, DICT_FLD__SYS_FOREIGN_FOR_NAME__ID, &len);
 
 	/* Copy the string because the page may be modified or evicted
-	after mtr_commit() below. */
-	char	fk_id[MAX_TABLE_NAME_LEN + 1];
-
-	ut_a(len <= MAX_TABLE_NAME_LEN);
-	memcpy(fk_id, field, len);
+	after mtr.commit() below. */
+	char	fk_id[MAX_TABLE_NAME_LEN + NAME_LEN];
+	err = DB_SUCCESS;
+	if (UNIV_LIKELY(len < sizeof fk_id)) {
+		memcpy(fk_id, field, len);
+	}
 
 	btr_pcur_store_position(&pcur, &mtr);
 
@@ -3118,10 +3163,13 @@ loop:
 
 	/* Load the foreign constraint definition to the dictionary cache */
 
-	switch (dberr_t err
-		= dict_load_foreign(table_name, col_names, trx_id,
+	err = len < sizeof fk_id
+		? dict_load_foreign(table_name, false, col_names, trx_id,
 				    check_recursive, check_charsets,
-				    {fk_id, len}, ignore_err, fk_tables)) {
+				    {fk_id, len}, ignore_err, fk_tables)
+		: DB_CORRUPTION;
+
+	switch (err) {
 	case DB_SUCCESS:
 		break;
 	case DB_NOT_FOUND:
@@ -3133,24 +3181,26 @@ loop:
 				"SYS_FOREIGN", int(len), fk_id);
 		/* fall through */
 	default:
-		btr_pcur_close(&pcur);
+corrupted:
+		ut_free(pcur.old_rec_buf);
 		DBUG_RETURN(err);
 	}
 
 	mtr.start();
-	pcur.restore_position(BTR_SEARCH_LEAF, &mtr);
+	if (pcur.restore_position(BTR_SEARCH_LEAF, &mtr)
+	    == btr_pcur_t::CORRUPTED) {
+		mtr.commit();
+		goto corrupted;
+	}
 next_rec:
 	btr_pcur_move_to_next_user_rec(&pcur, &mtr);
 
 	goto loop;
 
 load_next_index:
-	btr_pcur_close(&pcur);
-	mtr_commit(&mtr);
+	mtr.commit();
 
-	sec_index = dict_table_get_next_index(sec_index);
-
-	if (sec_index) {
+	if ((sec_index = dict_table_get_next_index(sec_index))) {
 		/* Switch to scan index on REF_NAME, fk_max_recusive_level
 		already been updated when scanning FOR_NAME index, no need to
 		update again */
@@ -3158,5 +3208,6 @@ load_next_index:
 		goto start_load;
 	}
 
+	ut_free(pcur.old_rec_buf);
 	DBUG_RETURN(DB_SUCCESS);
 }

@@ -293,7 +293,7 @@ constexpr privilege_t SHOW_CREATE_TABLE_ACLS=
   existing temporary tables (CREATE_ACL is necessary for ALTER ... RENAME).
 */
 constexpr privilege_t TMP_TABLE_ACLS=
-  COL_DML_ACLS | ALL_TABLE_DDL_ACLS;
+  COL_DML_ACLS | ALL_TABLE_DDL_ACLS | REFERENCES_ACL;
 
 
 constexpr privilege_t PRIV_LOCK_TABLES= SELECT_ACL | LOCK_TABLES_ACL;
@@ -634,6 +634,7 @@ constexpr privilege_t PRIV_STMT_DROP_SERVER= FEDERATED_ADMIN_ACL | SUPER_ACL;
 
 /* Privileges related to processes */
 constexpr privilege_t PRIV_COM_PROCESS_INFO= PROCESS_ACL;
+// This privilege applies both for SHOW EXPLAIN and SHOW ANALYZE
 constexpr privilege_t PRIV_STMT_SHOW_EXPLAIN= PROCESS_ACL;
 constexpr privilege_t PRIV_STMT_SHOW_ENGINE_STATUS= PROCESS_ACL;
 constexpr privilege_t PRIV_STMT_SHOW_ENGINE_MUTEX= PROCESS_ACL;

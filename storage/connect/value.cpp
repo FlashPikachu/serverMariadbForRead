@@ -59,7 +59,7 @@
 #if defined(_DEBUG)
 #define CheckType(V)    if (Type != V->GetType()) { \
     PGLOBAL& g = Global; \
-    strcpy(g->Message, MSG(VALTYPE_NOMATCH)); \
+    snprintf(g->Message, sizeof(g->Message), MSG(VALTYPE_NOMATCH)); \
     throw Type;
 #else
 #define CheckType(V)
@@ -163,9 +163,9 @@ PCSZ GetTypeName(int type)
 /***********************************************************************/
 /*  GetTypeSize: returns the PlugDB internal type size.                */
 /***********************************************************************/
-int GetTypeSize(int type, int len)
-  {
-	switch (type) {
+unsigned GetTypeSize(int type, unsigned len)
+{
+  switch (type) {
     case TYPE_DECIM:
     case TYPE_BIN:
     case TYPE_STRING: len = len * sizeof(char); break;
@@ -176,7 +176,7 @@ int GetTypeSize(int type, int len)
     case TYPE_DOUBLE: len = sizeof(double);     break;
     case TYPE_TINY:   len = sizeof(char);       break;
     case TYPE_PCHAR:  len = sizeof(char*);      break;
-    default:          len = -1;
+    default:          len = 0;
   } // endswitch type
 
   return len;
@@ -360,7 +360,7 @@ PVAL AllocateValue(PGLOBAL g, void *value, short type, short prec)
       valp = new(g) TYPVAL<char>(*(char *)value, TYPE_TINY);
       break;
     default:
-      sprintf(g->Message, MSG(BAD_VALUE_TYPE), type);
+      snprintf(g->Message, sizeof(g->Message), MSG(BAD_VALUE_TYPE), type);
       return NULL;
   } // endswitch Type
 
@@ -421,7 +421,7 @@ PVAL AllocateValue(PGLOBAL g, int type, int len, int prec,
       valp = new(g) BINVAL(g, (void*)NULL, len, prec);
       break;
     default:
-      sprintf(g->Message, MSG(BAD_VALUE_TYPE), type);
+      snprintf(g->Message, sizeof(g->Message), MSG(BAD_VALUE_TYPE), type);
       return NULL;
   } // endswitch type
 
@@ -493,7 +493,7 @@ PVAL AllocateValue(PGLOBAL g, PVAL valp, int newtype, int uns)
 
       break;
     default:
-      sprintf(g->Message, MSG(BAD_VALUE_TYPE), newtype);
+      snprintf(g->Message, sizeof(g->Message), MSG(BAD_VALUE_TYPE), newtype);
       return NULL;
   } // endswitch type
   
@@ -556,7 +556,7 @@ BYTE VALUE::TestValue(PVAL vp)
 /***********************************************************************/
 bool VALUE::Compute(PGLOBAL g, PVAL *, int, OPVAL)
 {
-  strcpy(g->Message, "Compute not implemented for this value type");
+  snprintf(g->Message, sizeof(g->Message), "Compute not implemented for this value type");
   return true;
 } // end of Compute
 
@@ -1051,11 +1051,11 @@ TYPE TYPVAL<TYPE>::SafeAdd(TYPE n1, TYPE n2)
 
   if ((n2 > 0) && (n < n1)) {
     // Overflow
-    strcpy(g->Message, MSG(FIX_OVFLW_ADD));
+    snprintf(g->Message, sizeof(g->Message), MSG(FIX_OVFLW_ADD));
 		throw 138;
 	} else if ((n2 < 0) && (n > n1)) {
     // Underflow
-    strcpy(g->Message, MSG(FIX_UNFLW_ADD));
+    snprintf(g->Message, sizeof(g->Message), MSG(FIX_UNFLW_ADD));
 		throw 138;
 	} // endif's n2
 
@@ -1079,11 +1079,11 @@ TYPE TYPVAL<TYPE>::SafeMult(TYPE n1, TYPE n2)
 
   if (n > MinMaxVal(true)) {
     // Overflow
-    strcpy(g->Message, MSG(FIX_OVFLW_TIMES));
+    snprintf(g->Message, sizeof(g->Message), MSG(FIX_OVFLW_TIMES));
 		throw 138;
 	} else if (n < MinMaxVal(false)) {
     // Underflow
-    strcpy(g->Message, MSG(FIX_UNFLW_TIMES));
+    snprintf(g->Message, sizeof(g->Message), MSG(FIX_UNFLW_TIMES));
 		throw 138;
 	} // endif's n2
 
@@ -1119,7 +1119,7 @@ bool TYPVAL<TYPE>::Compute(PGLOBAL g, PVAL *vp, int np, OPVAL op)
       break;
     case OP_DIV:
       if (!val[1]) {
-        strcpy(g->Message, MSG(ZERO_DIVIDE));
+        snprintf(g->Message, sizeof(g->Message),MSG(ZERO_DIVIDE));
         return true;
         } // endif
 
@@ -1173,7 +1173,7 @@ bool TYPVAL<TYPE>::Compall(PGLOBAL g, PVAL *vp, int np, OPVAL op)
     case OP_DIV:
       if (val[0]) {
         if (!val[1]) {
-          strcpy(g->Message, MSG(ZERO_DIVIDE));
+          snprintf(g->Message, sizeof(g->Message), MSG(ZERO_DIVIDE));
           return true;
           } // endif
     
@@ -1189,8 +1189,8 @@ bool TYPVAL<TYPE>::Compall(PGLOBAL g, PVAL *vp, int np, OPVAL op)
       Tval = MY_MAX(val[0], val[1]);
       break;
     default:
-//    sprintf(g->Message, MSG(BAD_EXP_OPER), op);
-      strcpy(g->Message, "Function not supported");
+//    snprintf(g->Message, sizeof(g->Message), MSG(BAD_EXP_OPER), op);
+      snprintf(g->Message, sizeof(g->Message), "Function not supported");
       return true;
   } // endswitch op
 
@@ -1199,7 +1199,7 @@ bool TYPVAL<TYPE>::Compall(PGLOBAL g, PVAL *vp, int np, OPVAL op)
 
 /***********************************************************************/
 /*  FormatValue: This function set vp (a STRING value) to the string   */
-/*  constructed from its own value formated using the fmt format.      */
+/*  constructed from its own value formatted using the fmt format.     */
 /*  This function assumes that the format matches the value type.      */
 /***********************************************************************/
 template <class TYPE>
@@ -1435,7 +1435,7 @@ void TYPVAL<PSZ>::SetValue(int n)
   int      k = sprintf(buf, "%d", n);
 
   if (k > Len) {
-    sprintf(g->Message, MSG(VALSTR_TOO_LONG), buf, Len);
+    snprintf(g->Message, sizeof(g->Message), MSG(VALSTR_TOO_LONG), buf, Len);
 		throw 138;
 	} else
     SetValue_psz(buf);
@@ -1453,7 +1453,7 @@ void TYPVAL<PSZ>::SetValue(uint n)
   int      k = sprintf(buf, "%u", n);
 
   if (k > Len) {
-    sprintf(g->Message, MSG(VALSTR_TOO_LONG), buf, Len);
+    snprintf(g->Message, sizeof(g->Message), MSG(VALSTR_TOO_LONG), buf, Len);
     throw 138;
   } else
     SetValue_psz(buf);
@@ -1489,7 +1489,7 @@ void TYPVAL<PSZ>::SetValue(longlong n)
   int      k = sprintf(buf, "%lld", n);
 
   if (k > Len) {
-    sprintf(g->Message, MSG(VALSTR_TOO_LONG), buf, Len);
+    snprintf(g->Message, sizeof(g->Message), MSG(VALSTR_TOO_LONG), buf, Len);
 		throw 138;
 	} else
     SetValue_psz(buf);
@@ -1507,7 +1507,7 @@ void TYPVAL<PSZ>::SetValue(ulonglong n)
   int      k = sprintf(buf, "%llu", n);
 
   if (k > Len) {
-    sprintf(g->Message, MSG(VALSTR_TOO_LONG), buf, Len);
+    snprintf(g->Message, sizeof(g->Message), MSG(VALSTR_TOO_LONG), buf, Len);
     throw 138;
   } else
     SetValue_psz(buf);
@@ -1532,7 +1532,7 @@ void TYPVAL<PSZ>::SetValue(double f)
       break;
 
   if (k > Len) {
-    sprintf(g->Message, MSG(VALSTR_TOO_LONG), buf, Len);
+    snprintf(g->Message, sizeof(g->Message), MSG(VALSTR_TOO_LONG), buf, Len);
 		throw 138;
 	} else
     SetValue_psz(buf);
@@ -1700,8 +1700,8 @@ bool TYPVAL<PSZ>::Compute(PGLOBAL g, PVAL *vp, int np, OPVAL op)
 			SetValue_psz((strcmp(p[0], p[1]) > 0) ? p[0] : p[1]);
 			break;
 		default:
-			//    sprintf(g->Message, MSG(BAD_EXP_OPER), op);
-			strcpy(g->Message, "Function not supported");
+			//    snprintf(g->Message, sizeof(g->Message), MSG(BAD_EXP_OPER), op);
+			snprintf(g->Message, sizeof(g->Message), "Function not supported");
 			return true;
 	} // endswitch op
 
@@ -1711,7 +1711,7 @@ bool TYPVAL<PSZ>::Compute(PGLOBAL g, PVAL *vp, int np, OPVAL op)
 
 /***********************************************************************/
 /*  FormatValue: This function set vp (a STRING value) to the string   */
-/*  constructed from its own value formated using the fmt format.      */
+/*  constructed from its own value formatted using the fmt format.     */
 /*  This function assumes that the format matches the value type.      */
 /***********************************************************************/
 bool TYPVAL<PSZ>::FormatValue(PVAL vp, PCSZ fmt)
@@ -2325,7 +2325,7 @@ bool BINVAL::IsEqual(PVAL vp, bool chktype)
 
 /***********************************************************************/
 /*  FormatValue: This function set vp (a STRING value) to the string   */
-/*  constructed from its own value formated using the fmt format.      */
+/*  constructed from its own value formatted using the fmt format.     */
 /*  This function assumes that the format matches the value type.      */
 /***********************************************************************/
 bool BINVAL::FormatValue(PVAL vp, PCSZ fmt)
@@ -2398,7 +2398,7 @@ bool DTVAL::SetFormat(PGLOBAL g, PVAL valp)
   DTVAL *vp;
 
   if (valp->GetType() != TYPE_DATE) {
-    sprintf(g->Message, MSG(NO_FORMAT_TYPE), valp->GetType());
+    snprintf(g->Message, sizeof(g->Message), MSG(NO_FORMAT_TYPE), valp->GetType());
     return true;
   } else
     vp = (DTVAL*)valp;
@@ -2616,7 +2616,7 @@ bool DTVAL::MakeDate(PGLOBAL g, int *val, int nval)
   if (MakeTime(&datm))
   {
     if (g) {
-      strcpy(g->Message, MSG(BAD_DATETIME));
+      snprintf(g->Message, sizeof(g->Message), MSG(BAD_DATETIME));
       rc = true;
     } else
       Tval = 0;
@@ -2865,7 +2865,7 @@ bool DTVAL::WeekNum(PGLOBAL g, int& nval)
 
 /***********************************************************************/
 /*  FormatValue: This function set vp (a STRING value) to the string   */
-/*  constructed from its own value formated using the fmt format.      */
+/*  constructed from its own value formatted using the fmt format.     */
 /*  This function assumes that the format matches the value type.      */
 /***********************************************************************/
 bool DTVAL::FormatValue(PVAL vp, PCSZ fmt)

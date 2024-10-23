@@ -156,7 +156,7 @@ bool CMgoConn::Connect(PGLOBAL g)
 {
 	if (!Pcg->Db_name || !Pcg->Coll_name) {
 		// This would crash in mongoc_client_get_collection
-		strcpy(g->Message, "Missing DB or collection name");
+		snprintf(g->Message, sizeof(g->Message), "Missing DB or collection name");
 		return true;
 	}	// endif name
 
@@ -165,7 +165,7 @@ bool CMgoConn::Connect(PGLOBAL g)
 		__try {
 		  mongo_init(true);
 	  } __except (EXCEPTION_EXECUTE_HANDLER) {
-		  strcpy(g->Message, "Cannot load MongoDB C driver");
+		  snprintf(g->Message, sizeof(g->Message), "Cannot load MongoDB C driver");
 		  return true;
 	  }	// end try/except
 #else   // !_WIN32
@@ -175,7 +175,7 @@ bool CMgoConn::Connect(PGLOBAL g)
 	Uri = mongoc_uri_new_with_error(Pcg->Uristr, &Error);
 
 	if (!Uri) {
-		sprintf(g->Message, "Failed to parse URI: \"%s\" Msg: %s",
+		snprintf(g->Message, sizeof(g->Message), "Failed to parse URI: \"%s\" Msg: %s",
 			Pcg->Uristr, Error.message);
 		return true;
 	}	// endif Uri
@@ -196,7 +196,7 @@ bool CMgoConn::Connect(PGLOBAL g)
 	Client = mongoc_client_new_from_uri (Uri);
 
 	if (!Client) {
-		sprintf(g->Message, "Failed to get Client");
+		snprintf(g->Message, sizeof(g->Message), "Failed to get Client");
 		return true;
 	}	// endif Client
 
@@ -212,7 +212,7 @@ bool CMgoConn::Connect(PGLOBAL g)
 	Collection = mongoc_client_get_collection(Client, Pcg->Db_name, Pcg->Coll_name);
 
 	if (!Collection) {
-		sprintf(g->Message, "Failed to get Collection %s.%s",
+		snprintf(g->Message, sizeof(g->Message), "Failed to get Collection %s.%s",
 			      Pcg->Db_name, Pcg->Coll_name);
 		return true;
 	}	// endif Collection
@@ -379,7 +379,7 @@ bool CMgoConn::MakeCursor(PGLOBAL g)
 		p = strrchr(options, ']');
 
 		if (!p) {
-			strcpy(g->Message, "Missing ] in pipeline");
+			snprintf(g->Message, sizeof(g->Message), "Missing ] in pipeline");
 			return true;
 		} else
 			*(char*)p = 0;
@@ -390,7 +390,7 @@ bool CMgoConn::MakeCursor(PGLOBAL g)
 			s->Append(",{\"$match\":");
 
 			if (MakeSelector(g, filp, s)) {
-				strcpy(g->Message, "Failed making selector");
+				snprintf(g->Message, sizeof(g->Message), "Failed making selector");
 				return true;
 			} else
 				s->Append('}');
@@ -420,7 +420,7 @@ bool CMgoConn::MakeCursor(PGLOBAL g)
 		Query = bson_new_from_json((const uint8_t *)p, -1, &Error);
 
 		if (!Query) {
-			sprintf(g->Message, "Wrong pipeline: %s", Error.message);
+			snprintf(g->Message, sizeof(g->Message), "Wrong pipeline: %s", Error.message);
 			return true;
 		}	// endif Query
 
@@ -428,7 +428,7 @@ bool CMgoConn::MakeCursor(PGLOBAL g)
 			                                   Query, NULL, NULL);
 
 		if (mongoc_cursor_error(Cursor, &Error)) {
-			sprintf(g->Message, "Mongo aggregate Failure: %s", Error.message);
+			snprintf(g->Message, sizeof(g->Message), "Mongo aggregate Failure: %s", Error.message);
 			return true;
 		} // endif error
 
@@ -454,7 +454,7 @@ bool CMgoConn::MakeCursor(PGLOBAL g)
 					s->Append(',');
 
 				if (MakeSelector(g, filp, s)) {
-					strcpy(g->Message, "Failed making selector");
+					snprintf(g->Message, sizeof(g->Message), "Failed making selector");
 					return true;
 				}	// endif Selector
 
@@ -468,7 +468,7 @@ bool CMgoConn::MakeCursor(PGLOBAL g)
 			Query = bson_new_from_json((const uint8_t *)s->GetStr(), -1, &Error);
 
 			if (!Query) {
-				sprintf(g->Message, "Wrong filter: %s", Error.message);
+				snprintf(g->Message, sizeof(g->Message), "Wrong filter: %s", Error.message);
 				return true;
 			}	// endif Query
 
@@ -503,7 +503,7 @@ bool CMgoConn::MakeCursor(PGLOBAL g)
 			Opts = bson_new_from_json((const uint8_t *)p, -1, &Error);
 
 			if (!Opts) {
-				sprintf(g->Message, "Wrong options: %s", Error.message);
+				snprintf(g->Message, sizeof(g->Message), "Wrong options: %s", Error.message);
 				return true;
 			} // endif Opts
 
@@ -532,7 +532,7 @@ int CMgoConn::ReadNext(PGLOBAL g)
 			htrc("%s\n", GetDocument(g));
 
 	} else if (mongoc_cursor_error(Cursor, &Error)) {
-		sprintf(g->Message, "Mongo Cursor Failure: %s", Error.message);
+		snprintf(g->Message, sizeof(g->Message), "Mongo Cursor Failure: %s", Error.message);
 		rc = RC_FX;
 	} else
 		rc = RC_EF;
@@ -683,7 +683,7 @@ int CMgoConn::Write(PGLOBAL g)
 
 			if (!mongoc_collection_insert(Collection, MONGOC_INSERT_NONE,
 				                            Fpc->Child, NULL, &Error)) {
-				sprintf(g->Message, "Mongo insert: %s", Error.message);
+				snprintf(g->Message, sizeof(g->Message), "Mongo insert: %s", Error.message);
 				rc = RC_FX;
 			} // endif insert
 
@@ -698,11 +698,11 @@ int CMgoConn::Write(PGLOBAL g)
 			} // endif trace
 
 			if (!doc) {
-				sprintf(g->Message, "bson_new_from_json: %s", Error.message);
+				snprintf(g->Message, sizeof(g->Message), "bson_new_from_json: %s", Error.message);
 				rc = RC_FX;
 			}	else if (!mongoc_collection_insert(Collection,
 				         MONGOC_INSERT_NONE, doc, NULL, &Error)) {
-				sprintf(g->Message, "Mongo insert: %s", Error.message);
+				snprintf(g->Message, sizeof(g->Message), "Mongo insert: %s", Error.message);
 				bson_destroy(doc);
 				rc = RC_FX;
 			} // endif insert
@@ -759,19 +759,19 @@ int CMgoConn::Write(PGLOBAL g)
 				if (rc == RC_OK)
 					if (!mongoc_collection_update(Collection, MONGOC_UPDATE_NONE,
 						query, update, NULL, &Error)) {
-						sprintf(g->Message, "Mongo update: %s", Error.message);
+						snprintf(g->Message, sizeof(g->Message), "Mongo update: %s", Error.message);
 						rc = RC_FX;
 					} // endif update
 
 				bson_destroy(update);
 			} else if (!mongoc_collection_remove(Collection,
 				MONGOC_REMOVE_SINGLE_REMOVE, query, NULL, &Error)) {
-				sprintf(g->Message, "Mongo delete: %s", Error.message);
+				snprintf(g->Message, sizeof(g->Message), "Mongo delete: %s", Error.message);
 				rc = RC_FX;
 			} // endif remove
 
 		} else {
-			strcpy(g->Message, "Mongo update: cannot find _id");
+			snprintf(g->Message, sizeof(g->Message), "Mongo update: cannot find _id");
 			rc = RC_FX;
 		}	// endif b
 
@@ -790,7 +790,7 @@ bool CMgoConn::DocDelete(PGLOBAL g)
 
 	if (!mongoc_collection_remove(Collection, MONGOC_REMOVE_NONE,
 		                            Query, NULL, &Error)) {
-		sprintf(g->Message, "Mongo remove all: %s", Error.message);
+		snprintf(g->Message, sizeof(g->Message), "Mongo remove all: %s", Error.message);
 		return true;
 	}	// endif remove
 
@@ -843,7 +843,7 @@ char *CMgoConn::Mini(PGLOBAL g, PCOL colp, const bson_t *bson, bool b)
 		s = str = bson_as_json(bson, &len);
 
 	if (len > (size_t)colp->GetLength()) {
-		sprintf(g->Message, "Value too long for column %s", colp->GetName());
+		snprintf(g->Message, sizeof(g->Message), "Value too long for column %s", colp->GetName());
 		bson_free(str);
 		throw (int)TYPE_AM_MGO;
 	}	// endif len
@@ -1061,12 +1061,12 @@ bool CMgoConn::AddValue(PGLOBAL g, PCOL colp, bson_t *doc, char *key, bool upd)
 			rc = BSON_APPEND_DATE_TIME(doc, key, value->GetBigintValue() * 1000);
 			break;
 		default:
-			sprintf(g->Message, "Type %d not supported yet", colp->GetResultType());
+			snprintf(g->Message, sizeof(g->Message), "Type %d not supported yet", colp->GetResultType());
 			return true;
 	} // endswitch Buf_Type
 
 	if (!rc) {
-		strcpy(g->Message, "Adding value failed");
+		snprintf(g->Message, sizeof(g->Message), "Adding value failed");
 		return true;
 	} else
 		return false;

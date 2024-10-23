@@ -74,7 +74,7 @@ It was originally forked from Percona XtraBackup 2.3.8.")
 # Packages with default description
 SET(CPACK_RPM_client_PACKAGE_SUMMARY "MariaDB database client binaries")
 SET(CPACK_RPM_client_PACKAGE_DESCRIPTION "${CPACK_RPM_PACKAGE_DESCRIPTION}")
-SET(CPACK_RPM_common_PACKAGE_SUMMARY "MariaDB database common files (e.g. /etc/mysql/conf.d/mariadb.cnf)")
+SET(CPACK_RPM_common_PACKAGE_SUMMARY "MariaDB database common configuration files (e.g. /etc/mysql/conf.d/mariadb.cnf)")
 SET(CPACK_RPM_common_PACKAGE_DESCRIPTION "${CPACK_RPM_PACKAGE_DESCRIPTION}")
 SET(CPACK_RPM_compat_PACKAGE_SUMMARY "MariaDB database client library MySQL compat package")
 SET(CPACK_RPM_compat_PACKAGE_DESCRIPTION "${CPACK_RPM_PACKAGE_DESCRIPTION}")
@@ -108,6 +108,8 @@ SET(CPACK_RPM_SPEC_MORE_DEFINE "
 %define _sysconfdir ${INSTALL_SYSCONFDIR}
 %define restart_flag_dir %{_localstatedir}/lib/rpm-state/mariadb
 %define restart_flag %{restart_flag_dir}/need-restart
+
+%define pretrans %{nil}
 
 %{?filter_setup:
 %filter_provides_in \\\\.\\\\(test\\\\|result\\\\|h\\\\|cc\\\\|c\\\\|inc\\\\|opt\\\\|ic\\\\|cnf\\\\|rdiff\\\\|cpp\\\\)$
@@ -155,6 +157,7 @@ SET(ignored
   "%ignore ${CMAKE_INSTALL_PREFIX}/share/doc"
   "%ignore ${CMAKE_INSTALL_PREFIX}/share/man"
   "%ignore ${CMAKE_INSTALL_PREFIX}/share/man/man1"
+  "%ignore ${CMAKE_INSTALL_PREFIX}/share/man/man3"
   "%ignore ${CMAKE_INSTALL_PREFIX}/share/man/man8"
   "%ignore ${CMAKE_INSTALL_PREFIX}/share/pkgconfig"
   )
@@ -238,6 +241,8 @@ SET(CPACK_RPM_shared_POST_INSTALL_SCRIPT_FILE ${CMAKE_SOURCE_DIR}/support-files/
 SET(CPACK_RPM_shared_POST_UNINSTALL_SCRIPT_FILE ${CMAKE_SOURCE_DIR}/support-files/rpm/shared-post.sh)
 SET(CPACK_RPM_compat_POST_INSTALL_SCRIPT_FILE ${CMAKE_SOURCE_DIR}/support-files/rpm/shared-post.sh)
 SET(CPACK_RPM_compat_POST_UNINSTALL_SCRIPT_FILE ${CMAKE_SOURCE_DIR}/support-files/rpm/shared-post.sh)
+SET(CPACK_RPM_cracklib-password-check_POST_INSTALL_SCRIPT_FILE 
+  ${CMAKE_SOURCE_DIR}/plugin/cracklib_password_check/support-files/rpm/mariadb-plugin-cracklib-password-check-postin.sh)
 
 MACRO(ALTERNATIVE_NAME real alt)
   IF(${ARGC} GREATER 2)
@@ -271,7 +276,7 @@ ELSEIF(RPM MATCHES "fedora" OR RPM MATCHES "(rhel|centos)7")
   ALTERNATIVE_NAME("server" "mariadb-server")
   ALTERNATIVE_NAME("server" "mysql-compat-server")
   ALTERNATIVE_NAME("test"   "mariadb-test")
-ELSEIF(RPM MATCHES "(rhel|centos)8")
+ELSEIF(RPM MATCHES "(rhel|centos|rocky)[89]")
   SET(epoch 3:)
   ALTERNATIVE_NAME("backup" "mariadb-backup")
   ALTERNATIVE_NAME("client" "mariadb")
@@ -296,8 +301,9 @@ ELSEIF(RPM MATCHES "sles")
 ENDIF()
 
 # MDEV-24629, we need it outside of ELSIFs
-IF(RPM MATCHES "fedora3[234]")
+IF(RPM MATCHES "fedora")
   ALTERNATIVE_NAME("common" "mariadb-connector-c-config" ${MARIADB_CONNECTOR_C_VERSION}-1)
+  ALTERNATIVE_NAME("shared" "mariadb-connector-c" ${MARIADB_CONNECTOR_C_VERSION}-1)
 ENDIF()
 
 SET(PYTHON_SHEBANG "/usr/bin/python3" CACHE STRING "python shebang")
@@ -341,7 +347,7 @@ IF(compat53 AND compat101)
   # RHEL6/CentOS6 install Postfix by default, and it requires
   # libmysqlclient.so.16 that pulls in mysql-libs-5.1.x
   # And the latter conflicts with our rpms.
-  # Make sure that for these distribuions all our rpms require
+  # Make sure that for these distributions all our rpms require
   # MariaDB-compat, that will replace mysql-libs-5.1
   IF(RPM MATCHES "(rhel|centos)[67]")
     SET(CPACK_RPM_common_PACKAGE_REQUIRES "MariaDB-compat")

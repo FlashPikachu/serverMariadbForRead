@@ -19,7 +19,9 @@ SET default_storage_engine= InnoDB;
 CREATE TABLE t1 (a INT);
 INSERT INTO t1 VALUES (1);
 COMMIT;
+--disable_ps2_protocol
 SELECT * INTO OUTFILE 'load.data' FROM t1;
+--enable_ps2_protocol
 
 LOAD DATA INFILE 'load.data' INTO TABLE t1;
 SELECT * FROM t1;
@@ -128,7 +130,10 @@ DROP TABLE t1;
 
 --echo # Test case 10: Check that the statements 'HELP'
 --echo # is supported by prepared statements
-HELP `ALTER SERVER`;
+# avoid existing articles that may get updated.
+INSERT INTO mysql.help_topic VALUES (0, 'Tamagotchi', 0, 'This digital pet is not a KB article', 'no example', 'https://tamagotchi.com/');
+HELP `Tamagotchi`;
+DELETE FROM mysql.help_topic WHERE help_topic_id = 0;
 
 --echo # Test case 11: Check that the statements CREATE/ALTER/DROP PROCEDURE
 --echo # are supported by prepared statements

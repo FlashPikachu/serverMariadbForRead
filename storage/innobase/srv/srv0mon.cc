@@ -272,18 +272,6 @@ static monitor_info_t	innodb_counter_info[] =
 	 MONITOR_EXISTING | MONITOR_DEFAULT_ON),
 	 MONITOR_DEFAULT_START, MONITOR_OVLD_PAGES_WRITTEN},
 
-	{"buffer_index_pages_written", "buffer",
-	 "Number of index pages written (innodb_index_pages_written)",
-	 static_cast<monitor_type_t>(
-	 MONITOR_EXISTING | MONITOR_DEFAULT_ON),
-	 MONITOR_DEFAULT_START, MONITOR_OVLD_INDEX_PAGES_WRITTEN},
-
-	{"buffer_non_index_pages_written", "buffer",
-	 "Number of non index pages written (innodb_non_index_pages_written)",
-	 static_cast<monitor_type_t>(
-	 MONITOR_EXISTING | MONITOR_DEFAULT_ON),
-	 MONITOR_DEFAULT_START, MONITOR_OVLD_NON_INDEX_PAGES_WRITTEN},
-
 	{"buffer_pages_read", "buffer",
 	 "Number of pages read (innodb_pages_read)",
 	 static_cast<monitor_type_t>(
@@ -702,12 +690,14 @@ static monitor_info_t	innodb_counter_info[] =
 	 MONITOR_DEFAULT_START, MONITOR_RSEG_HISTORY_LEN},
 
 	{"trx_undo_slots_used", "transaction", "Number of undo slots used",
-	 MONITOR_NONE,
+	 static_cast<monitor_type_t>(
+	 MONITOR_EXISTING | MONITOR_DISPLAY_CURRENT),
 	 MONITOR_DEFAULT_START, MONITOR_NUM_UNDO_SLOT_USED},
 
 	{"trx_undo_slots_cached", "transaction",
 	 "Number of undo slots cached",
-	 MONITOR_NONE,
+	 static_cast<monitor_type_t>(
+	 MONITOR_EXISTING | MONITOR_DISPLAY_CURRENT | MONITOR_DEFAULT_ON),
 	 MONITOR_DEFAULT_START, MONITOR_NUM_UNDO_SLOT_CACHED},
 
 	{"trx_rseg_current_size", "transaction",
@@ -744,7 +734,8 @@ static monitor_info_t	innodb_counter_info[] =
 
 	{"purge_dml_delay_usec", "purge",
 	 "Microseconds DML to be delayed due to purge lagging",
-	 MONITOR_DISPLAY_CURRENT,
+	 static_cast<monitor_type_t>(
+	 MONITOR_EXISTING | MONITOR_DISPLAY_CURRENT),
 	 MONITOR_DEFAULT_START, MONITOR_DML_PURGE_DELAY},
 
 	{"purge_stop_count", "purge",
@@ -883,7 +874,7 @@ static monitor_info_t	innodb_counter_info[] =
 	 MONITOR_DEFAULT_START, MONITOR_MODULE_INDEX},
 
 	{"index_page_splits", "index", "Number of index page splits",
-	 MONITOR_NONE,
+	 MONITOR_EXISTING,
 	 MONITOR_DEFAULT_START, MONITOR_INDEX_SPLIT},
 
 	{"index_page_merge_attempts", "index",
@@ -1357,6 +1348,24 @@ TPOOL_SUPPRESS_TSAN static ulint srv_mon_get_rseg_size()
   return size;
 }
 
+/** @return number of used undo log slots */
+TPOOL_SUPPRESS_TSAN static ulint srv_mon_get_rseg_used()
+{
+  ulint size= 0;
+  for (const auto &rseg : trx_sys.rseg_array)
+    size+= UT_LIST_GET_LEN(rseg.undo_list);
+  return size;
+}
+
+/** @return number of cached undo log slots */
+TPOOL_SUPPRESS_TSAN static ulint srv_mon_get_rseg_cached()
+{
+  ulint size= 0;
+  for (const auto &rseg : trx_sys.rseg_array)
+    size+= UT_LIST_GET_LEN(rseg.undo_cached);
+  return size;
+}
+
 /****************************************************************//**
 This function consolidates some existing server counters used
 by "system status variables". These existing system variables do not have
@@ -1386,10 +1395,12 @@ srv_mon_process_existing_counter(
 
 	/* Get the value from corresponding global variable */
 	switch (monitor_id) {
-	/* export_vars.innodb_buffer_pool_reads. Num Reads from
-	disk (page not in buffer) */
+	case MONITOR_INDEX_SPLIT:
+		value = buf_pool.pages_split;
+		break;
+
 	case MONITOR_OVLD_BUF_POOL_READS:
-		value = srv_stats.buf_pool_reads;
+		value = buf_pool.stat.n_pages_read;
 		break;
 
 	/* innodb_buffer_pool_read_requests, the number of logical
@@ -1450,7 +1461,7 @@ srv_mon_process_existing_counter(
 
 	/* innodb_buffer_pool_bytes_dirty */
 	case MONITOR_OVLD_BUF_POOL_BYTES_DIRTY:
-		value = buf_pool.stat.flush_list_bytes;
+		value = buf_pool.flush_list_bytes;
 		break;
 
 	/* innodb_buffer_pool_pages_free */
@@ -1466,16 +1477,6 @@ srv_mon_process_existing_counter(
 	/* innodb_pages_written, the number of page written */
 	case MONITOR_OVLD_PAGES_WRITTEN:
 		value = buf_pool.stat.n_pages_written;
-		break;
-
-	/* innodb_index_pages_written, the number of index pages written */
-	case MONITOR_OVLD_INDEX_PAGES_WRITTEN:
-		value = srv_stats.index_pages_written;
-		break;
-
-	/* innodb_non_index_pages_written, the number of non index pages written */
-	case MONITOR_OVLD_NON_INDEX_PAGES_WRITTEN:
-		value = srv_stats.non_index_pages_written;
 		break;
 
 	case MONITOR_LRU_BATCH_FLUSH_TOTAL_PAGE:
@@ -1618,21 +1619,20 @@ srv_mon_process_existing_counter(
 	/* innodb_row_lock_time */
 	case MONITOR_OVLD_LOCK_WAIT_TIME:
 		// dirty read without lock_sys.wait_mutex
-		value = lock_sys.get_wait_time_cumulative() / 1000;
+		value = lock_sys.get_wait_time_cumulative();
 		break;
 
 	/* innodb_row_lock_time_max */
 	case MONITOR_OVLD_LOCK_MAX_WAIT_TIME:
 		// dirty read without lock_sys.wait_mutex
-		value = lock_sys.get_wait_time_max() / 1000;
+		value = lock_sys.get_wait_time_max();
 		break;
 
 	/* innodb_row_lock_time_avg */
 	case MONITOR_OVLD_LOCK_AVG_WAIT_TIME:
 		mysql_mutex_lock(&lock_sys.wait_mutex);
 		if (auto count = lock_sys.get_wait_cumulative()) {
-			value = lock_sys.get_wait_time_cumulative() / 1000
-				/ count;
+			value = lock_sys.get_wait_time_cumulative() / count;
 		} else {
 			value = 0;
 		}
@@ -1646,13 +1646,21 @@ srv_mon_process_existing_counter(
 		break;
 
 	case MONITOR_RSEG_HISTORY_LEN:
-		value = trx_sys.history_size();
+		value = trx_sys.history_size_approx();
 		break;
 
 	case MONITOR_RSEG_CUR_SIZE:
 		value = srv_mon_get_rseg_size();
 		break;
-
+	case MONITOR_DML_PURGE_DELAY:
+		value = srv_max_purge_lag_delay;
+		break;
+	case MONITOR_NUM_UNDO_SLOT_USED:
+		value = srv_mon_get_rseg_used();
+		break;
+	case MONITOR_NUM_UNDO_SLOT_CACHED:
+		value = srv_mon_get_rseg_cached();
+		break;
 	case MONITOR_OVLD_N_FILE_OPENED:
 		value = fil_system.n_open;
 		break;
@@ -1763,7 +1771,6 @@ srv_mon_process_existing_counter(
 	case MONITOR_TIMEOUT:
 		value = lock_sys.timeouts;
 		break;
-
 	default:
 		ut_error;
 	}

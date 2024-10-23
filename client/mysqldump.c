@@ -148,6 +148,7 @@ static ulonglong opt_system= 0ULL;
 static my_bool insert_pat_inited= 0, debug_info_flag= 0, debug_check_flag= 0,
                select_field_names_inited= 0;
 static ulong opt_max_allowed_packet, opt_net_buffer_length;
+static double opt_max_statement_time= 0.0;
 static MYSQL mysql_connection,*mysql=0;
 static DYNAMIC_STRING insert_pat, select_field_names;
 static char  *opt_password=0,*current_user=0,
@@ -164,6 +165,7 @@ static my_bool server_supports_switching_charsets= TRUE;
 static ulong opt_compatible_mode= 0;
 #define MYSQL_OPT_MASTER_DATA_EFFECTIVE_SQL 1
 #define MYSQL_OPT_MASTER_DATA_COMMENTED_SQL 2
+#define MYSQL_OPT_MAX_STATEMENT_TIME 0
 #define MYSQL_OPT_SLAVE_DATA_EFFECTIVE_SQL 1
 #define MYSQL_OPT_SLAVE_DATA_COMMENTED_SQL 2
 static uint opt_mysql_port= 0, opt_master_data;
@@ -192,12 +194,10 @@ FILE *stderror_file=0;
 static uint opt_protocol= 0;
 static char *opt_plugin_dir= 0, *opt_default_auth= 0;
 
-static uint protocol_to_force= MYSQL_PROTOCOL_DEFAULT;
-
 /*
-Dynamic_string wrapper functions. In this file use these
-wrappers, they will terminate the process if there is
-an allocation failure.
+  Dynamic_string wrapper functions. In this file use these
+  wrappers, they will terminate the process if there is
+  an allocation failure.
 */
 static void init_dynamic_string_checked(DYNAMIC_STRING *str, const char *init_str,
 			    size_t init_alloc, size_t alloc_increment);
@@ -279,7 +279,9 @@ static struct my_option my_long_options[] =
    &opt_slave_apply, &opt_slave_apply, 0, GET_BOOL, NO_ARG,
    0, 0, 0, 0, 0, 0},
   {"as-of", OPT_ASOF_TIMESTAMP,
-   "Dump system versioned table as of specified timestamp.",
+   "Dump system versioned table(s) as of specified timestamp. "
+   "Argument is interpreted according to the --tz-utc setting. "
+   "Table structures are always dumped as of current timestamp.",
    &opt_asof_timestamp, &opt_asof_timestamp, 0, GET_STR, REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
   {"character-sets-dir", OPT_CHARSETS_DIR,
    "Directory for character set files.", (char **)&charsets_dir,
@@ -473,6 +475,10 @@ static struct my_option my_long_options[] =
     &opt_max_allowed_packet, &opt_max_allowed_packet, 0,
     GET_ULONG, REQUIRED_ARG, 24*1024*1024, 4096,
    (longlong) 2L*1024L*1024L*1024L, MALLOC_OVERHEAD, 1024, 0},
+  {"max-statement-time", MYSQL_OPT_MAX_STATEMENT_TIME,
+   "Max statement execution time. If unset, overrides server default with 0.",
+   &opt_max_statement_time, &opt_max_statement_time, 0, GET_DOUBLE,
+   REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
   {"net_buffer_length", OPT_NET_BUFFER_LENGTH, 
    "The buffer size for TCP/IP and socket communication.",
     &opt_net_buffer_length, &opt_net_buffer_length, 0,
@@ -581,7 +587,8 @@ static struct my_option my_long_options[] =
    &opt_dump_triggers, &opt_dump_triggers, 0, GET_BOOL,
    NO_ARG, 1, 0, 0, 0, 0, 0},
   {"tz-utc", OPT_TZ_UTC,
-    "SET TIME_ZONE='+00:00' at top of dump to allow dumping of TIMESTAMP data when a server has data in different time zones or data is being moved between servers with different time zones.",
+   "Set connection time zone to UTC before commencing the dump and add "
+   "SET TIME_ZONE=´+00:00´ to the top of the dump file.",
     &opt_tz_utc, &opt_tz_utc, 0, GET_BOOL, NO_ARG, 1, 0, 0, 0, 0, 0},
 #ifndef DONT_ALLOW_USER_CHANGE
   {"user", 'u', "User for login if not current user.",
@@ -872,9 +879,6 @@ get_one_option(const struct my_option *opt,
                const char *filename)
 {
 
-  /* Track when protocol is set via CLI to not force overrides */
-  static my_bool ignore_protocol_override = FALSE;
-
   switch (opt->id) {
   case 'p':
     if (argument == disabled_my_option)
@@ -905,13 +909,6 @@ get_one_option(const struct my_option *opt,
   case 'W':
 #ifdef _WIN32
     opt_protocol= MYSQL_PROTOCOL_PIPE;
-
-    /* Prioritize pipe if explicit via command line */
-    if (filename[0] == '\0')
-    {
-      ignore_protocol_override = TRUE;
-      protocol_to_force = MYSQL_PROTOCOL_DEFAULT;
-    }
 #endif
     break;
   case 'N':
@@ -1062,49 +1059,30 @@ get_one_option(const struct my_option *opt,
       sf_leaking_memory= 1; /* no memory leak reports here */
       exit(1);
     }
-
-    /* Specification of protocol via CLI trumps implicit overrides */
-    if (filename[0] == '\0')
-    {
-      ignore_protocol_override = TRUE;
-      protocol_to_force = MYSQL_PROTOCOL_DEFAULT;
-    }
-
     break;
   case (int) OPT_DEFAULT_CHARSET:
     if (default_charset == disabled_my_option)
       default_charset= (char *)mysql_universal_client_charset;
     break;
   case 'P':
-    /* If port and socket are set, fall back to default behavior */
-    if (protocol_to_force == SOCKET_PROTOCOL_TO_FORCE)
+    if (filename[0] == '\0')
     {
-      ignore_protocol_override = TRUE;
-      protocol_to_force = MYSQL_PROTOCOL_DEFAULT;
-    }
-
-    /* If port is set via CLI, try to force protocol to TCP */
-    if (filename[0] == '\0' &&
-        !ignore_protocol_override &&
-        protocol_to_force == MYSQL_PROTOCOL_DEFAULT)
-    {
-      protocol_to_force = MYSQL_PROTOCOL_TCP;
+      /* Port given on command line, switch protocol to use TCP */
+      opt_protocol= MYSQL_PROTOCOL_TCP;
     }
     break;
   case 'S':
-    /* If port and socket are set, fall back to default behavior */
-    if (protocol_to_force == MYSQL_PROTOCOL_TCP)
+    if (filename[0] == '\0')
     {
-      ignore_protocol_override = TRUE;
-      protocol_to_force = MYSQL_PROTOCOL_DEFAULT;
-    }
-
-    /* Prioritize socket if set via command line */
-    if (filename[0] == '\0' &&
-        !ignore_protocol_override &&
-        protocol_to_force == MYSQL_PROTOCOL_DEFAULT)
-    {
-      protocol_to_force = SOCKET_PROTOCOL_TO_FORCE;
+      /*
+        Socket given on command line, switch protocol to use SOCKETSt
+        Except on Windows if 'protocol= pipe' has been provided in
+        the config file or command line.
+      */
+      if (opt_protocol != MYSQL_PROTOCOL_PIPE)
+      {
+        opt_protocol= MYSQL_PROTOCOL_SOCKET;
+      }
     }
     break;
   }
@@ -1153,19 +1131,9 @@ static int get_options(int *argc, char ***argv)
     return(ho_error);
 
   /*
-     Command line options override configured protocol
-   */
-  if (protocol_to_force > MYSQL_PROTOCOL_DEFAULT
-      && protocol_to_force != opt_protocol)
-  {
-    warn_protocol_override(current_host, &opt_protocol, protocol_to_force);
-  }
-
-
-  /*
-    Dumping under --system=stats with --replace or --inser-ignore is safe and will not
-    retult into race condition. Otherwise dump only structure and ignore data by default
-    while dumping.
+    Dumping under --system=stats with --replace or --insert-ignore is
+    safe and will not result into race condition. Otherwise dump only
+    structure and ignore data by default while dumping.
   */
   if (!(opt_system & OPT_SYSTEM_STATS) && !(opt_ignore || opt_replace_into))
   {
@@ -1355,7 +1323,7 @@ static int get_options(int *argc, char ***argv)
     return EX_USAGE;
   }
   if (tty_password)
-    opt_password=get_tty_password(NullS);
+    opt_password=my_get_tty_password(NullS);
   return(0);
 } /* get_options */
 
@@ -2595,7 +2563,7 @@ static uint dump_events_for_db(char *db)
   if (mysql_query_with_error_report(mysql, &event_list_res, "show events"))
     DBUG_RETURN(0);
 
-  strcpy(delimiter, ";");
+  safe_strcpy(delimiter, sizeof(delimiter), ";");
   if (mysql_num_rows(event_list_res) > 0)
   {
     if (opt_xml)
@@ -2607,7 +2575,10 @@ static uint dump_events_for_db(char *db)
       /* Get database collation. */
 
       if (fetch_db_collation(db_name_buff, db_cl_name, sizeof (db_cl_name)))
+      {
+        mysql_free_result(event_list_res);
         DBUG_RETURN(1);
+      }
     }
 
     if (switch_character_set_results(mysql, "binary"))
@@ -2847,11 +2818,7 @@ static uint dump_routines_for_db(char *db)
                     routine_type[i], routine_name);
 
         if (mysql_query_with_error_report(mysql, &routine_res, query_buff))
-        {
-          mysql_free_result(routine_list_res);
-          routine_list_res= 0;
-          DBUG_RETURN(1);
-        }
+          continue;
 
         while ((row= mysql_fetch_row(routine_res)))
         {
@@ -2880,6 +2847,9 @@ static uint dump_routines_for_db(char *db)
                             create_caption_xml[i]);
               continue;
             }
+
+            switch_sql_mode(sql_file, ";", row[1]);
+
             if (opt_drop)
               fprintf(sql_file, "/*!50003 DROP %s IF EXISTS %s */;\n",
                       routine_type[i], routine_name);
@@ -2918,9 +2888,6 @@ static uint dump_routines_for_db(char *db)
                         "The following dump may be incomplete.\n"
                       "--\n");
             }
-
-
-            switch_sql_mode(sql_file, ";", row[1]);
 
             fprintf(sql_file,
                     "DELIMITER ;;\n"
@@ -2981,7 +2948,7 @@ static inline my_bool general_log_or_slow_log_tables(const char *db,
            !my_strcasecmp(charset_info, table, "transaction_registry"));
 }
 /*
-  get_sequence_structure-- retrievs sequence structure, prints out corresponding
+  get_sequence_structure-- retrieves sequence structure, prints out corresponding
   CREATE statement
   ARGS
     seq         - sequence name
@@ -3043,7 +3010,7 @@ static void get_sequence_structure(const char *seq, const char *db)
   DBUG_VOID_RETURN;
 }
 /*
-  get_table_structure -- retrievs database structure, prints out corresponding
+  get_table_structure -- retrieves database structure, prints out corresponding
   CREATE statement and fills out insert_pat if the table is the type we will
   be dumping.
 
@@ -3216,9 +3183,8 @@ static uint get_table_structure(const char *table, const char *db, char *table_t
       if (strcmp(field->name, "View") == 0)
       {
         char *scv_buff= NULL;
-        my_ulonglong n_cols;
 
-        verbose_msg("-- It's a view, create dummy table for view\n");
+        verbose_msg("-- It's a view, create dummy view for view\n");
 
         /* save "show create" statement for later */
         if ((row= mysql_fetch_row(result)) && (scv_buff=row[1]))
@@ -3227,9 +3193,9 @@ static uint get_table_structure(const char *table, const char *db, char *table_t
         mysql_free_result(result);
 
         /*
-          Create a table with the same name as the view and with columns of
+          Create a view with the same name as the view and with columns of
           the same name in order to satisfy views that depend on this view.
-          The table will be removed when the actual view is created.
+          The view will be removed when the actual view is created.
 
           The properties of each column, are not preserved in this temporary
           table, because they are not necessary.
@@ -3261,23 +3227,9 @@ static uint get_table_structure(const char *table, const char *db, char *table_t
         else
           my_free(scv_buff);
 
-        n_cols= mysql_num_rows(result);
-        if (0 != n_cols)
+        if (mysql_num_rows(result) != 0)
         {
 
-          /*
-            The actual formula is based on the column names and how the .FRM
-            files are stored and is too volatile to be repeated here.
-            Thus we simply warn the user if the columns exceed a limit we
-            know works most of the time.
-          */
-          if (n_cols >= 1000)
-            fprintf(stderr,
-                    "-- Warning: Creating a stand-in table for view %s may"
-                    " fail when replaying the dump file produced because "
-                    "of the number of columns exceeding 1000. Exercise "
-                    "caution when replaying the produced dump file.\n", 
-                    table);
           if (opt_drop)
           {
             /*
@@ -3293,7 +3245,7 @@ static uint get_table_structure(const char *table, const char *db, char *table_t
           fprintf(sql_file,
                   "SET @saved_cs_client     = @@character_set_client;\n"
                   "SET character_set_client = utf8;\n"
-                  "/*!50001 CREATE TABLE %s (\n",
+                  "/*!50001 CREATE VIEW %s AS SELECT\n",
                   result_table);
 
           /*
@@ -3305,28 +3257,21 @@ static uint get_table_structure(const char *table, const char *db, char *table_t
           row= mysql_fetch_row(result);
 
           /*
-            The actual column type doesn't matter anyway, since the table will
+            The actual column value doesn't matter anyway, since the view will
             be dropped at run time.
-            We do tinyint to avoid hitting the row size limit.
           */
-          fprintf(sql_file, "  %s tinyint NOT NULL",
+          fprintf(sql_file, " 1 AS %s",
                   quote_name(row[0], name_buff, 0));
 
           while((row= mysql_fetch_row(result)))
           {
             /* col name, col type */
-            fprintf(sql_file, ",\n  %s tinyint NOT NULL",
+            fprintf(sql_file, ",\n  1 AS %s",
                     quote_name(row[0], name_buff, 0));
           }
 
-          /*
-            Stand-in tables are always MyISAM tables as the default
-            engine might have a column-limit that's lower than the
-            number of columns in the view, and MyISAM support is
-            guaranteed to be in the server anyway.
-          */
           fprintf(sql_file,
-                  "\n) ENGINE=MyISAM */;\n"
+                  " */;\n"
                   "SET character_set_client = @saved_cs_client;\n");
 
           check_io(sql_file);
@@ -3452,7 +3397,10 @@ static uint get_table_structure(const char *table, const char *db, char *table_t
       if (path)
       {
         if (!(sql_file= open_sql_file_for_table(table, O_WRONLY)))
+        {
+          mysql_free_result(result);
           DBUG_RETURN(0);
+        }
         write_header(sql_file, db);
       }
 
@@ -3853,7 +3801,7 @@ static int dump_triggers_for_table(char *table_name, char *db_name)
   char       name_buff[NAME_LEN*4+3];
   char       query_buff[QUERY_LENGTH];
   uint       old_opt_compatible_mode= opt_compatible_mode;
-  MYSQL_RES  *show_triggers_rs;
+  MYSQL_RES  *show_triggers_rs= NULL;
   MYSQL_ROW  row;
   FILE      *sql_file= md_result_file;
 
@@ -3937,8 +3885,6 @@ static int dump_triggers_for_table(char *table_name, char *db_name)
   }
 
 skip:
-  mysql_free_result(show_triggers_rs);
-
   if (switch_character_set_results(mysql, default_charset))
     goto done;
 
@@ -3953,7 +3899,7 @@ skip:
 done:
   if (path)
     my_fclose(sql_file, MYF(0));
-
+  mysql_free_result(show_triggers_rs);
   DBUG_RETURN(ret);
 }
 
@@ -4069,7 +4015,7 @@ static void dump_table(const char *table, const char *db, const uchar *hash_key,
   size_t total_length, init_length;
   my_bool versioned= 0;
 
-  MYSQL_RES     *res;
+  MYSQL_RES     *res= NULL;
   MYSQL_FIELD   *field;
   MYSQL_ROW     row;
   DBUG_ENTER("dump_table");
@@ -4267,6 +4213,8 @@ static void dump_table(const char *table, const char *db, const uchar *hash_key,
       fprintf(stderr,"%s: Error in field count for table: %s !  Aborting.\n",
               my_progname_short, result_table);
       error= EX_CONSCHECK;
+      if (!quick)
+        mysql_free_result(res);
       goto err;
     }
 
@@ -4575,6 +4523,7 @@ static void dump_table(const char *table, const char *db, const uchar *hash_key,
 err:
   dynstr_free(&query_string);
   maybe_exit(error);
+  mysql_free_result(res);
   DBUG_VOID_RETURN;
 } /* dump_table */
 
@@ -4748,7 +4697,7 @@ static int dump_all_users_roles_and_grants()
       echo "$dosomethingspecial"
      ) | mysql -h $host
 
-     doesn't end up with a suprise that the $dosomethingspecial cannot
+     doesn't end up with a surprise that the $dosomethingspecial cannot
      be done because `special_role` isn't active.
 
      We create a new role for importing that becomes the default admin for new
@@ -4757,8 +4706,8 @@ static int dump_all_users_roles_and_grants()
      create new admins for the created role.
 
      At the end of the import the mariadb_dump_import_role is be dropped,
-     which implictly drops all its admin aspects of the dropped role.
-     This is significiantly easlier than revoking the ADMIN of each role
+     which implicitly drops all its admin aspects of the dropped role.
+     This is significantly easier than revoking the ADMIN of each role
      from the current user.
   */
   fputs("SELECT COALESCE(CURRENT_ROLE(),'NONE') into @current_role;\n"
@@ -4846,7 +4795,11 @@ static int dump_all_users_roles_and_grants()
       "                                                    '@', QUOTE(DEFAULT_ROLE_HOST))) as r,"
       "  CONCAT(QUOTE(mu.USER),'@',QUOTE(mu.HOST)) as u "
       "FROM mysql.user mu LEFT JOIN mysql.default_roles using (USER, HOST)"))
+  {
+    mysql_free_result(tableres);
     return 1;
+  }
+
   while ((row= mysql_fetch_row(tableres)))
   {
     if (dump_grants(row[1]))
@@ -5439,6 +5392,55 @@ int init_dumping_views(char *qdatabase __attribute__((unused)))
 
 
 /*
+mysql specific database initialization.
+
+SYNOPSIS
+  init_dumping_mysql_tables
+
+  protections around dumping general/slow query log
+  qdatabase      quoted name of the "mysql" database
+
+RETURN VALUES
+  0        Success.
+  1        Failure.
+*/
+static int init_dumping_mysql_tables(char *qdatabase)
+{
+  DBUG_ENTER("init_dumping_mysql_tables");
+
+  if (opt_drop_database)
+    fprintf(md_result_file,
+            "\n/*!50106 SET @save_log_output=@@LOG_OUTPUT*/;\n"
+            "/*M!100203 EXECUTE IMMEDIATE IF(@@LOG_OUTPUT='TABLE' AND (@@SLOW_QUERY_LOG=1 OR @@GENERAL_LOG=1),"
+              "\"SET GLOBAL LOG_OUTPUT='NONE'\", \"DO 0\") */;\n");
+
+  DBUG_RETURN(init_dumping_tables(qdatabase));
+}
+
+
+static void dump_first_mysql_tables(char *database)
+{
+  char table_type[NAME_LEN];
+  char ignore_flag;
+  DBUG_ENTER("dump_first_mysql_tables");
+
+  if (!get_table_structure((char *) "general_log",
+                           database, table_type, &ignore_flag, NULL) )
+    verbose_msg("-- Warning: get_table_structure() failed with some internal "
+                "error for 'general_log' table\n");
+  if (!get_table_structure((char *) "slow_log",
+                           database, table_type, &ignore_flag, NULL) )
+    verbose_msg("-- Warning: get_table_structure() failed with some internal "
+                "error for 'slow_log' table\n");
+  /* general and slow query logs exist now */
+  if (opt_drop_database)
+    fprintf(md_result_file,
+            "\n/*!50106 SET GLOBAL LOG_OUTPUT=@save_log_output*/;\n\n");
+  DBUG_VOID_RETURN;
+}
+
+
+/*
 Table Specific database initialization.
 
 SYNOPSIS
@@ -5544,7 +5546,6 @@ static int dump_all_tables_in_db(char *database)
   char table_buff[NAME_LEN*2+3];
   char hash_key[2*NAME_LEN+2];  /* "db.tablename" */
   char *afterdot;
-  my_bool general_log_table_exists= 0, slow_log_table_exists=0;
   my_bool transaction_registry_table_exists= 0;
   int using_mysql_db= !my_strcasecmp(charset_info, database, "mysql");
   DBUG_ENTER("dump_all_tables_in_db");
@@ -5552,10 +5553,14 @@ static int dump_all_tables_in_db(char *database)
   afterdot= strmov(hash_key, database);
   *afterdot++= '.';
 
-  if (init_dumping(database, init_dumping_tables))
+  if (init_dumping(database, using_mysql_db ? init_dumping_mysql_tables
+                   : init_dumping_tables))
     DBUG_RETURN(1);
   if (opt_xml)
     print_xml_tag(md_result_file, "", "\n", "database", "name=", database, NullS);
+
+  if (using_mysql_db)
+    dump_first_mysql_tables(database);
 
   if (lock_tables)
   {
@@ -5645,24 +5650,16 @@ static int dump_all_tables_in_db(char *database)
     else
     {
       /*
-        If general_log and slow_log exists in the 'mysql' database,
+        If transaction_registry exists in the 'mysql' database,
          we should dump the table structure. But we cannot
          call get_table_structure() here as 'LOCK TABLES' query got executed
          above on the session and that 'LOCK TABLES' query does not contain
-         'general_log' and 'slow_log' tables. (you cannot acquire lock
-         on log tables). Hence mark the existence of these log tables here and
+         'transaction_registry'. Hence mark the existence of the table here and
          after 'UNLOCK TABLES' query is executed on the session, get the table
          structure from server and dump it in the file.
       */
-      if (using_mysql_db)
-      {
-        if (!my_strcasecmp(charset_info, table, "general_log"))
-          general_log_table_exists= 1;
-        else if (!my_strcasecmp(charset_info, table, "slow_log"))
-          slow_log_table_exists= 1;
-        else if (!my_strcasecmp(charset_info, table, "transaction_registry"))
-          transaction_registry_table_exists= 1;
-      }
+      if (using_mysql_db && !my_strcasecmp(charset_info, table, "transaction_registry"))
+        transaction_registry_table_exists= 1;
     }
   }
 
@@ -5683,38 +5680,24 @@ static int dump_all_tables_in_db(char *database)
     DBUG_PRINT("info", ("Dumping routines for database %s", database));
     dump_routines_for_db(database);
   }
-  if (opt_xml)
-  {
-    fputs("</database>\n", md_result_file);
-    check_io(md_result_file);
-  }
   if (lock_tables)
     (void) mysql_query_with_error_report(mysql, 0, "UNLOCK TABLES");
   if (using_mysql_db)
   {
-    char table_type[NAME_LEN];
-    char ignore_flag;
-    if (general_log_table_exists)
-    {
-      if (!get_table_structure((char *) "general_log",
-                               database, table_type, &ignore_flag, NULL) )
-        verbose_msg("-- Warning: get_table_structure() failed with some internal "
-                    "error for 'general_log' table\n");
-    }
-    if (slow_log_table_exists)
-    {
-      if (!get_table_structure((char *) "slow_log",
-                               database, table_type, &ignore_flag, NULL) )
-        verbose_msg("-- Warning: get_table_structure() failed with some internal "
-                    "error for 'slow_log' table\n");
-    }
     if (transaction_registry_table_exists)
     {
+       char table_type[NAME_LEN];
+       char ignore_flag;
       if (!get_table_structure((char *) "transaction_registry",
                                database, table_type, &ignore_flag, NULL) )
         verbose_msg("-- Warning: get_table_structure() failed with some internal "
                     "error for 'transaction_registry' table\n");
     }
+  }
+  if (opt_xml)
+  {
+    fputs("</database>\n", md_result_file);
+    check_io(md_result_file);
   }
   if (flush_privileges && using_mysql_db)
   {
@@ -5901,7 +5884,8 @@ static int get_sys_var_lower_case_table_names()
     lower_case_table_names= atoi(row[1]);
     mysql_free_result(table_res);
   }
-
+  if (!row)
+    mysql_free_result(table_res);
   return lower_case_table_names;
 }
 
@@ -6144,7 +6128,11 @@ static int do_show_master_status(MYSQL *mysql_con, int consistent_binlog_pos,
     }
 
     if (have_mariadb_gtid && get_gtid_pos(gtid_pos, 1))
+    {
+      mysql_free_result(master);
       return 1;
+    }
+
   }
 
   /* SHOW MASTER STATUS reports file and position */
@@ -6266,7 +6254,10 @@ static int do_show_slave_status(MYSQL *mysql_con, int use_gtid,
     {
       char gtid_pos[MAX_GTID_LENGTH];
       if (have_mariadb_gtid && get_gtid_pos(gtid_pos, 0))
+      {
+        mysql_free_result(slave);
         return 1;
+      }
       if (opt_comments)
         fprintf(md_result_file, "\n--\n-- Gtid position to start replication "
                 "from\n--\n\n");
@@ -6462,7 +6453,7 @@ static ulong find_set(TYPELIB *lib, const char *x, size_t length,
 {
   const char *end= x + length;
   ulong found= 0;
-  uint find;
+  int find;
   char buff[255];
 
   *err_pos= 0;                  /* No error yet */
@@ -6819,15 +6810,8 @@ static my_bool get_view_structure(char *table, char* db)
                 "\n--\n-- Final view structure for view %s\n--\n\n",
                 fix_for_comment(result_table));
 
-  /* Table might not exist if this view was dumped with --tab. */
-  fprintf(sql_file, "/*!50001 DROP TABLE IF EXISTS %s*/;\n", opt_quoted_table);
-  if (opt_drop)
-  {
-    fprintf(sql_file, "/*!50001 DROP VIEW IF EXISTS %s*/;\n",
-            opt_quoted_table);
-    check_io(sql_file);
-  }
-
+  /* View might not exist if this view was dumped with --tab. */
+  fprintf(sql_file, "/*!50001 DROP VIEW IF EXISTS %s*/;\n", opt_quoted_table);
 
   my_snprintf(query, sizeof(query),
               "SELECT CHECK_OPTION, DEFINER, SECURITY_TYPE, "
@@ -6999,6 +6983,7 @@ static void dynstr_realloc_checked(DYNAMIC_STRING *str, ulong additional_size)
 
 int main(int argc, char **argv)
 {
+  char query[48];
   char bin_log_name[FN_REFLEN];
   int exit_code;
   int consistent_binlog_pos= 0;
@@ -7040,6 +7025,13 @@ int main(int argc, char **argv)
   if (!path)
     write_header(md_result_file, *argv);
 
+  /* Set MAX_STATEMENT_TIME to 0 unless set in client */
+  my_snprintf(query, sizeof(query), "/*!100100 SET @@MAX_STATEMENT_TIME=%f */", opt_max_statement_time);
+  mysql_query(mysql, query);
+
+  /* Set server side timeout between client commands to server compiled-in default */
+  mysql_query(mysql, "/*!100100 SET WAIT_TIMEOUT=DEFAULT */");
+
   /* Check if the server support multi source */
   if (mysql_get_server_version(mysql) >= 100000)
   {
@@ -7072,7 +7064,12 @@ int main(int argc, char **argv)
     if (flush_logs || opt_delete_master_logs)
     {
       if (mysql_refresh(mysql, REFRESH_LOG))
+      {
+        fprintf(stderr,
+                "Flush logs or delete master logs failure in server \n");
+        first_error= EX_MYSQLERR;
         goto err;
+      }
       verbose_msg("-- main : logs flushed successfully!\n");
     }
 
@@ -7158,7 +7155,7 @@ int main(int argc, char **argv)
   if (opt_system & OPT_SYSTEM_SERVERS)
     dump_all_servers();
 
-  /* These must be last as they explictly change the current database to mysql */
+  /* These must be last as they explicitly change the current database to mysql */
   if (opt_system & OPT_SYSTEM_STATS)
     dump_all_stats();
 

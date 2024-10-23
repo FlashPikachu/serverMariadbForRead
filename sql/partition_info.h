@@ -36,22 +36,32 @@ struct st_ddl_log_memory_entry;
 
 #define MAX_PART_NAME_SIZE 8
 
-
 struct Vers_part_info : public Sql_alloc
 {
   Vers_part_info() :
     limit(0),
+    auto_hist(false),
     now_part(NULL),
     hist_part(NULL)
   {
     interval.type= INTERVAL_LAST;
   }
-  Vers_part_info(Vers_part_info &src) :
+  Vers_part_info(const Vers_part_info &src) :
     interval(src.interval),
     limit(src.limit),
+    auto_hist(src.auto_hist),
     now_part(NULL),
     hist_part(NULL)
   {
+  }
+  Vers_part_info& operator= (const Vers_part_info &src)
+  {
+    interval= src.interval;
+    limit= src.limit;
+    auto_hist= src.auto_hist;
+    now_part= src.now_part;
+    hist_part= src.hist_part;
+    return *this;
   }
   bool initialized()
   {
@@ -68,17 +78,27 @@ struct Vers_part_info : public Sql_alloc
     }
     return false;
   }
-  struct {
+  struct interval_t {
     my_time_t start;
     INTERVAL step;
     enum interval_type type;
-    bool is_set() { return type < INTERVAL_LAST; }
+    bool is_set() const { return type < INTERVAL_LAST; }
+    bool operator==(const interval_t &rhs) const
+    {
+      /* TODO: equivalent intervals like 1 hour and 60 mins should be considered equal */
+      return start == rhs.start && type == rhs.type && !memcmp(&step, &rhs.step, sizeof(INTERVAL));
+    }
   } interval;
   ulonglong limit;
+  bool auto_hist;
   partition_element *now_part;
   partition_element *hist_part;
 };
 
+/*
+  See generate_partition_syntax() for details of how the data is used
+  in partition expression.
+*/
 class partition_info : public DDL_LOG_STATE, public Sql_alloc
 {
 public:
@@ -88,6 +108,10 @@ public:
   List<partition_element> partitions;
   List<partition_element> temp_partitions;
 
+  /*
+    These are mutually exclusive with part_expr/subpart_expr depending on
+    what is specified in partitioning filter: expression or column list.
+  */
   List<const char> part_field_list;
   List<const char> subpart_field_list;
   
@@ -324,12 +348,11 @@ public:
     part_field_list.empty();
     subpart_field_list.empty();
   }
-  ~partition_info() {}
+  ~partition_info() = default;
 
   partition_info *get_clone(THD *thd, bool empty_data_and_index_file= FALSE);
   bool set_named_partition_bitmap(const char *part_name, size_t length);
   bool set_partition_bitmaps(List<String> *partition_names);
-  bool set_partition_bitmaps_from_table(TABLE_LIST *table_list);
   /* Answers the question if subpartitioning is used for a certain table */
   bool is_sub_partitioned()
   {
@@ -393,14 +416,15 @@ public:
   bool vers_init_info(THD *thd);
   bool vers_set_interval(THD *thd, Item *interval,
                          interval_type int_type, Item *starts,
-                         const char *table_name);
-  bool vers_set_limit(ulonglong limit)
+                         bool auto_part, const char *table_name);
+  bool vers_set_limit(ulonglong limit, bool auto_part, const char *table_name);
+  bool vers_set_hist_part(THD* thd, uint *create_count);
+  bool vers_require_hist_part(THD *thd) const
   {
-    DBUG_ASSERT(part_type == VERSIONING_PARTITION);
-    vers_info->limit= limit;
-    return !limit;
+    return part_type == VERSIONING_PARTITION &&
+      thd->lex->vers_history_generating();
   }
-  int vers_set_hist_part(THD *thd);
+  void vers_check_limit(THD *thd);
   bool vers_fix_field_list(THD *thd);
   void vers_update_el_ids();
   partition_element *get_partition(uint part_id)
@@ -415,10 +439,16 @@ public:
     return NULL;
   }
   uint next_part_no(uint new_parts) const;
+
+  int gen_part_type(THD *thd, String *str) const;
 };
+
+void part_type_error(THD *thd, partition_info *work_part_info,
+                     const char *part_type, partition_info *tab_part_info);
 
 uint32 get_next_partition_id_range(struct st_partition_iter* part_iter);
 bool check_partition_dirs(partition_info *part_info);
+bool vers_create_partitions(THD* thd, TABLE_LIST* tl, uint num_parts);
 
 /* Initialize the iterator to return a single partition with given part_id */
 
@@ -474,11 +504,6 @@ bool partition_info::vers_fix_field_list(THD * thd)
 }
 
 
-/**
-  @brief Update partition_element's id
-
-  @returns true on error; false on success
-*/
 inline
 void partition_info::vers_update_el_ids()
 {

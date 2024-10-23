@@ -403,12 +403,14 @@ INSERT INTO t2 VALUES( '2010-02-01 09:31:11' );
 --echo # The bug would cause the range optimizer's comparison to use an open
 --echo # interval here. This reveals itself only in the number of reads 
 --echo # performed.
+--disable_ps2_protocol
 FLUSH STATUS;
 --replace_column 1 x 2 x 3 x 5 x 6 x 7 x 8 x 9 x 10 x
 EXPLAIN
 SELECT * FROM t2 WHERE a < '2010-02-01 09:31:02.0';
 SELECT * FROM t2 WHERE a < '2010-02-01 09:31:02.0';
 SHOW STATUS LIKE 'Handler_read_next';
+--enable_ps2_protocol
 
 DROP TABLE t1, t2;
 
@@ -717,10 +719,13 @@ SET sql_mode=DEFAULT;
 --echo # MDEV-17979 Assertion `0' failed in Item::val_native upon SELECT with timestamp, NULLIF, GROUP BY
 --echo #
 
+#double warning
+--disable_view_protocol
 CREATE TABLE t1 (a INT, b TIMESTAMP) ENGINE=MyISAM;
 INSERT INTO t1 VALUES (1,'2018-06-19 00:00:00');
 SELECT NULLIF(b, 'N/A') AS f, MAX(a) FROM t1 GROUP BY f;
 DROP TABLE t1;
+--enable_view_protocol
 
 --echo #
 --echo # MDEV-17972 Assertion `is_valid_value_slow()' failed in Datetime::Datetime
@@ -737,7 +742,9 @@ FLUSH TABLES;
 # 0xFF       - record flags
 # 0x77777777 - TIMESTAMP integer part
 # 0xFFFFFF   - TIMESTAMP bad fractional part
+--disable_ps2_protocol
 --eval SELECT CONCAT(0xFF,0x77777777,0xFFFFFF) INTO OUTFILE '$MYSQLD_DATADIR/test/t1.MYD' FIELDS TERMINATED BY '' ESCAPED BY '' LINES TERMINATED BY ''
+--enable_ps2_protocol
 --eval SELECT HEX(LOAD_FILE('$MYSQLD_DATADIR/test/t1.MYD')) AS MYD
 --enable_query_log
 SELECT a, CAST(a AS DATETIME) AS dt0, CAST(a AS DATETIME(6)) AS dt6 FROM t1;
@@ -807,6 +814,7 @@ DROP TABLE t1;
 CREATE TABLE t1 (c1 timestamp);
 SELECT MIN(t1.c1) AS k1 FROM t1 HAVING (k1 >= ALL(SELECT 'a' UNION SELECT 'r'));
 SELECT * FROM t1 HAVING MIN(t1.c1) >= ALL(SELECT 'a' UNION SELECT 'r');
+SELECT * FROM t1 HAVING MIN(t1.c1) > 0;
 DROP TABLE t1;
 
 CREATE TABLE t1 (c1 timestamp);
@@ -874,7 +882,44 @@ SELECT CASE WHEN a THEN DEFAULT(a) END FROM t1;
 DROP TABLE t1;
 SET timestamp=DEFAULT;
 
+--echo #
+--echo # MDEV-27653 long uniques don't work with unicode collations
+--echo #
+
+CREATE TABLE t1 (a timestamp, UNIQUE KEY(a) USING HASH);
+SET time_zone='+00:00';
+INSERT INTO t1 VALUES ('2001-01-01 10:20:30');
+SET time_zone='+01:00';
+--error ER_DUP_ENTRY
+INSERT INTO t1 SELECT MAX(a) FROM t1;
+SELECT * FROM t1;
+DROP TABLE t1;
+
+CREATE TABLE t1 (a timestamp, UNIQUE KEY(a) USING HASH);
+SET time_zone='+00:00';
+INSERT INTO t1 VALUES ('2001-01-01 10:20:30');
+SET time_zone='+01:00';
+CHECK TABLE t1;
+DROP TABLE t1;
+SET time_zone=DEFAULT;
 
 --echo #
 --echo # End of 10.4 tests
+--echo #
+
+--echo #
+--echo # MDEV-29225 make explicit_defaults_for_timestamps SESSION variable
+--echo #
+
+set explicit_defaults_for_timestamp=OFF;
+create table t1 (f1 timestamp, f2 timestamp);
+show create table t1;
+drop table t1;
+set explicit_defaults_for_timestamp=ON;
+create table t1 (f1 timestamp, f2 timestamp);
+show create table t1;
+drop table t1;
+
+--echo #
+--echo # End of 10.10 tests
 --echo #

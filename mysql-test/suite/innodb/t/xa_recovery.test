@@ -1,6 +1,7 @@
 --source include/have_innodb.inc
 # Embedded server does not support restarting.
 --source include/not_embedded.inc
+--source include/no_valgrind_without_big.inc
 
 # MDEV-8841 - close tables opened by previous tests, 
 # so they don't get marked crashed when the server gets crashed
@@ -46,7 +47,9 @@ DROP TABLE t2;
 disconnect con1;
 
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+--disable_ps2_protocol
 SELECT * FROM t1;
+--enable_ps2_protocol
 XA ROLLBACK 'x';
 SELECT * FROM t1;
 

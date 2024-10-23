@@ -56,6 +56,11 @@ my_bool wsrep_on(const THD *)
 void wsrep_thd_LOCK(const THD *)
 { }
 
+int wsrep_thd_TRYLOCK(const THD *)
+{
+  return 0;
+}
+
 void wsrep_thd_UNLOCK(const THD *)
 { }
 
@@ -99,6 +104,12 @@ void wsrep_thd_self_abort(THD *)
 { }
 
 int wsrep_thd_append_key(THD *, const struct wsrep_key*, int, enum Wsrep_service_key_type)
+{ return 0; }
+
+int wsrep_thd_append_table_key(THD *, const char*, const char*, enum Wsrep_service_key_type)
+{ return 0; }
+
+my_bool wsrep_thd_is_local_transaction(const THD*)
 { return 0; }
 
 const char* wsrep_thd_client_state_str(const THD*)
@@ -147,8 +158,6 @@ my_bool wsrep_thd_has_ignored_error(const THD*)
 void wsrep_thd_set_ignored_error(THD*, my_bool)
 { }
 ulong wsrep_OSU_method_get(const THD*)
-{ return 0;}
-bool wsrep_thd_set_wsrep_aborter(THD*, THD*)
 { return 0;}
 
 void wsrep_report_bf_lock_wait(const THD*,

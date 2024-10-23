@@ -30,7 +30,7 @@
 #include "wsrep_utils.h"
 #include "wsrep_xid.h"
 #include "wsrep_thd.h"
-#include "wsrep_mysqld.h"
+#include "wsrep_server_state.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -299,6 +299,15 @@ void wsrep_sst_auth_init ()
 
 bool  wsrep_sst_donor_check (sys_var *self, THD* thd, set_var* var)
 {
+  if ((! var->save_result.string_value.str) ||
+      (var->save_result.string_value.length > (FN_REFLEN -1))) // safety
+  {
+    my_error(ER_WRONG_VALUE_FOR_VAR, MYF(0), var->var->name.str,
+             var->save_result.string_value.str ?
+             var->save_result.string_value.str : "NULL");
+    return 1;
+  }
+
   return 0;
 }
 
@@ -336,9 +345,14 @@ static bool wsrep_sst_complete (THD*                thd,
   if ((state == Wsrep_server_state::s_joiner ||
        state == Wsrep_server_state::s_initialized))
   {
-    Wsrep_server_state::instance().sst_received(client_service,
-       rcode);
-    WSREP_INFO("SST succeeded for position %s", start_pos_buf);
+    if (Wsrep_server_state::instance().sst_received(client_service, rcode))
+    {
+      failed= true;
+    }
+    else
+    {
+      WSREP_INFO("SST succeeded for position %s", start_pos_buf);
+    }
   }
   else
   {
@@ -1149,12 +1163,14 @@ static ssize_t sst_prepare_other (const char*  method,
                  WSREP_SST_OPT_ADDR " '%s' "
                  WSREP_SST_OPT_DATA " '%s' "
                  "%s"
-                 WSREP_SST_OPT_PARENT " '%d'"
+                 WSREP_SST_OPT_PARENT " %d "
+                 WSREP_SST_OPT_PROGRESS " %d"
                  "%s"
                  "%s",
                  method, addr_in, mysql_real_data_home,
                  wsrep_defaults_file,
                  (int)getpid(),
+                 wsrep_debug ? 1 : 0,
                  binlog_opt_val, binlog_index_opt_val);
 
   my_free(binlog_opt_val);
@@ -1305,35 +1321,46 @@ std::string wsrep_sst_prepare()
   /*
     Figure out SST receive address. Common for all SST methods.
   */
+  wsp::Address* addr_in_parser= NULL;
+
   // Attempt 1: wsrep_sst_receive_address
   if (wsrep_sst_receive_address &&
-      strcmp (wsrep_sst_receive_address, WSREP_SST_ADDRESS_AUTO))
+      strcmp(wsrep_sst_receive_address, WSREP_SST_ADDRESS_AUTO))
   {
-    addr_in= wsrep_sst_receive_address;
+    addr_in_parser = new wsp::Address(wsrep_sst_receive_address);
+
+    if (!addr_in_parser->is_valid())
+    {
+      WSREP_ERROR("Could not parse wsrep_sst_receive_address : %s",
+                  wsrep_sst_receive_address);
+      unireg_abort(1);
+    }
   }
-
   //Attempt 2: wsrep_node_address
-  else if (wsrep_node_address && strlen(wsrep_node_address))
+  else if (wsrep_node_address && *wsrep_node_address)
   {
-    wsp::Address addr(wsrep_node_address);
+    addr_in_parser = new wsp::Address(wsrep_node_address);
 
-    if (!addr.is_valid())
+    if (addr_in_parser->is_valid())
+    {
+      // we must not inherit the port number from this address:
+      addr_in_parser->set_port(0);
+    }
+    else
     {
       WSREP_ERROR("Could not parse wsrep_node_address : %s",
                   wsrep_node_address);
       throw wsrep::runtime_error("Failed to prepare for SST. Unrecoverable");
     }
-    memcpy(ip_buf, addr.get_address(), addr.get_address_len());
-    addr_in= ip_buf;
   }
   // Attempt 3: Try to get the IP from the list of available interfaces.
   else
   {
-    ssize_t ret= wsrep_guess_ip (ip_buf, ip_max);
+    ssize_t ret= wsrep_guess_ip(ip_buf, ip_max);
 
     if (ret && ret < ip_max)
     {
-      addr_in= ip_buf;
+      addr_in_parser = new wsp::Address(ip_buf);
     }
     else
     {
@@ -1342,6 +1369,51 @@ std::string wsrep_sst_prepare()
       throw wsrep::runtime_error("Could not prepare state transfer request");
     }
   }
+
+  assert(addr_in_parser);
+
+  size_t len= addr_in_parser->get_address_len();
+  bool is_ipv6= addr_in_parser->is_ipv6();
+  const char* address= addr_in_parser->get_address();
+
+  if (len > (is_ipv6 ? ip_max - 2 : ip_max))
+  {
+    WSREP_ERROR("Address to accept state transfer is too long: '%s'",
+                address);
+    unireg_abort(1);
+  }
+
+  if (is_ipv6)
+  {
+    /* wsrep_sst_*.sh scripts requite ipv6 addreses to be in square breackets */
+    ip_buf[0] = '[';
+    /* the length (len) already includes the null byte: */
+    memcpy(ip_buf + 1, address, len - 1);
+    ip_buf[len] = ']';
+    ip_buf[len + 1] = 0;
+    len += 2;
+  }
+  else
+  {
+    memcpy(ip_buf, address, len);
+  }
+
+  int port= addr_in_parser->get_port();
+  if (port)
+  {
+    size_t space= ip_max - len;
+    ip_buf[len - 1] = ':';
+    int ret= snprintf(ip_buf + len, ip_max - len, "%d", port);
+    if (ret <= 0 || (size_t) ret > space)
+    {
+      WSREP_ERROR("Address to accept state transfer is too long: '%s:%d'",
+                  address, port);
+      unireg_abort(1);
+    }
+  }
+
+  delete addr_in_parser;
+  addr_in = ip_buf;
 
   ssize_t addr_len= -ENOSYS;
   method = wsrep_sst_method;
@@ -1784,6 +1856,7 @@ wait_signal:
 
           WSREP_INFO("Donor state reached");
 
+#ifdef ENABLED_DEBUG_SYNC
           DBUG_EXECUTE_IF("sync.wsrep_donor_state",
           {
             const char act[]=
@@ -1793,6 +1866,7 @@ wait_signal:
             assert(!debug_sync_set_action(thd.ptr,
                                           STRING_WITH_LEN(act)));
           };);
+#endif
 
           goto wait_signal;
         }
@@ -1901,16 +1975,18 @@ static int sst_donate_other (const char*        method,
                  "wsrep_sst_%s "
                  WSREP_SST_OPT_ROLE " 'donor' "
                  WSREP_SST_OPT_ADDR " '%s' "
-                 WSREP_SST_OPT_LPORT " '%u' "
+                 WSREP_SST_OPT_LPORT " %u "
                  WSREP_SST_OPT_SOCKET " '%s' "
+                 WSREP_SST_OPT_PROGRESS " %d "
                  WSREP_SST_OPT_DATA " '%s' "
                  "%s"
                  WSREP_SST_OPT_GTID " '%s:%lld' "
-                 WSREP_SST_OPT_GTID_DOMAIN_ID " '%d'"
+                 WSREP_SST_OPT_GTID_DOMAIN_ID " %d"
                  "%s"
                  "%s"
                  "%s",
                  method, addr, mysqld_port, mysqld_unix_port,
+                 wsrep_debug ? 1 : 0,
                  mysql_real_data_home,
                  wsrep_defaults_file,
                  uuid_oss.str().c_str(), gtid.seqno().get(), wsrep_gtid_server.domain_id,

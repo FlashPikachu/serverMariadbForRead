@@ -1,3 +1,7 @@
+#remove this include after fix MDEV-27871
+# maybe some tests need to be excluded separately after fix
+--source include/no_view_protocol.inc
+
 SET TIME_ZONE = _latin1 '+03:00';
 
 --echo #
@@ -459,6 +463,7 @@ select * from t1;
 show create table t1;
 drop table t1;
 
+--disable_ps2_protocol
 # Ensure that row_count() value is reset after drop table.
 select 1;
 select hex(concat(row_count()));
@@ -470,6 +475,7 @@ select hex(concat(found_rows()));
 create table t1 as select concat(found_rows()) as c1;
 show create table t1;
 drop table t1;
+--enable_ps2_protocol
 
 create table t1 as select concat(uuid_short()) as c1;
 show create table t1;
@@ -1631,6 +1637,7 @@ SELECT charset(@x), collation(@x);
 --echo #
 --echo # Bug#54916 GROUP_CONCAT + IFNULL truncates output
 --echo #
+
 SELECT @@collation_connection;
 # ENGINE=MYISAM is very important to make sure "SYSTEM" join type
 # is in use, which will create instances of Item_copy.

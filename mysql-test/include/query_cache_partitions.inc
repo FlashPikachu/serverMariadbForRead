@@ -4,6 +4,10 @@
 #     $engine_type       -- storage engine to be tested
 # have to be set before sourcing this script.
 
+# Tests will be skipped for the view protocol because the view protocol creates 
+# an additional util connection and other statistics data
+-- source include/no_view_protocol.inc
+
 SET global query_cache_type=ON;
 SET local query_cache_type=ON;
 eval SET SESSION DEFAULT_STORAGE_ENGINE = $engine_type;
@@ -40,13 +44,14 @@ flush status;
 show status like "Qcache_queries_in_cache";
 show status like "Qcache_hits";
 
-
+--disable_ps2_protocol
 SELECT cool FROM `t1` WHERE (`t1`.id = 1) LIMIT 1;
 SELECT cool FROM `t1` WHERE (`t1`.id = 1) LIMIT 1;
 SELECT cool FROM `t1` WHERE (`t1`.id = 1) LIMIT 1;
 
 show status like "Qcache_queries_in_cache";
 show status like "Qcache_hits";
+--enable_ps2_protocol
 
 drop table t1;
 
@@ -75,12 +80,14 @@ flush status;
 show status like "Qcache_queries_in_cache";
 show status like "Qcache_hits";
 
+--disable_ps2_protocol
 SELECT cool FROM `t1` WHERE (`t1`.id = 1) LIMIT 1;
 SELECT cool FROM `t1` WHERE (`t1`.id = 1) LIMIT 1;
 SELECT cool FROM `t1` WHERE (`t1`.id = 1) LIMIT 1;
 
 show status like "Qcache_queries_in_cache";
 show status like "Qcache_hits";
+--enable_ps2_protocol
 
 drop table t1;
 
@@ -110,6 +117,7 @@ INSERT INTO t1 VALUES (1, now(), 0);
 show status like "Qcache_queries_in_cache";
 show status like "Qcache_hits";
 
+--disable_ps2_protocol
 BEGIN;
 UPDATE `t1` SET `cool` = 1 WHERE `id` = 1;
 SELECT cool FROM `t1` WHERE (`t1`.id = 1) LIMIT 1;
@@ -122,6 +130,7 @@ SELECT cool FROM `t1` WHERE (`t1`.id = 1) LIMIT 1;
 
 show status like "Qcache_queries_in_cache";
 show status like "Qcache_hits";
+--enable_ps2_protocol
 
 drop table t1;
 

@@ -100,6 +100,7 @@ DBUG_PRINT("test", ("name: %s", str));					\
    fprintf(stdout, "%u of (%u/%u): %s", test_count++, iter_count,	\
    opt_count, str);							\
    fprintf(stdout, "  \n#####################################\n");	\
+   fflush(stdout);                                                      \
  }
 
 #define myheader_r(str)							\
@@ -109,6 +110,7 @@ DBUG_PRINT("test", ("name: %s", str));					\
    fprintf(stdout, "\n\n#####################################\n");	\
    fprintf(stdout, "%s", str);						\
    fprintf(stdout, "  \n#####################################\n");	\
+   fflush(stdout);                                                      \
  }
 
 static void print_error(const char *msg);
@@ -1364,7 +1366,7 @@ static void get_options(int *argc, char ***argv)
     exit(ho_error);
 
   if (tty_password)
-    opt_password= get_tty_password(NullS);
+    opt_password= my_get_tty_password(NullS);
   return;
 }
 

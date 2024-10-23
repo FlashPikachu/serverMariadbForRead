@@ -6,6 +6,7 @@ source include/have_innodb.inc;
 --disable_query_log
 
 set @@session.time_zone='+00:00';
+set @@global.time_zone='+00:00';
 select ifnull(max(transaction_id), 0) into @start_trx_id from mysql.transaction_registry;
 set @test_start=now(6);
 
@@ -85,6 +86,18 @@ begin
   elseif row_end = row_start then
     return "ERROR: row_end == row_start";
   elseif current_row(row_end) then
+    return "CURRENT ROW";
+  end if;
+  return "HISTORICAL ROW";
+end~~
+delimiter ;~~
+
+delimiter ~~;
+eval create or replace function check_row_slave(row_start $sys_datatype_expl, row_end $sys_datatype_expl)
+returns varchar(255)
+deterministic
+begin
+  if current_row(row_end) then
     return "CURRENT ROW";
   end if;
   return "HISTORICAL ROW";

@@ -26,6 +26,7 @@
 extern const LEX_CSTRING rpl_gtid_slave_state_table_name;
 
 class String;
+#define PARAM_GTID(G) G.domain_id, G.server_id, G.seq_no
 
 #define GTID_MAX_STR_LENGTH (10+1+10+1+20)
 #define PARAM_GTID(G) G.domain_id, G.server_id, G.seq_no
@@ -245,6 +246,8 @@ struct rpl_slave_state
   ulong count() const { return hash.records; }
   int update(uint32 domain_id, uint32 server_id, uint64 sub_id,
              uint64 seq_no, void *hton, rpl_group_info *rgi);
+  int update_nolock(uint32 domain_id, uint32 server_id, uint64 sub_id,
+                    uint64 seq_no, void *hton, rpl_group_info *rgi);
   int truncate_state_table(THD *thd);
   void select_gtid_pos_table(THD *thd, LEX_CSTRING *out_tablename);
   int record_gtid(THD *thd, const rpl_gtid *gtid, uint64 sub_id,
@@ -329,7 +332,8 @@ struct rpl_binlog_state
   int update_with_next_gtid(uint32 domain_id, uint32 server_id,
                              rpl_gtid *gtid);
   int alloc_element_nolock(const rpl_gtid *gtid);
-  bool check_strict_sequence(uint32 domain_id, uint32 server_id, uint64 seq_no);
+  bool check_strict_sequence(uint32 domain_id, uint32 server_id, uint64 seq_no,
+                             bool no_error= false);
   int bump_seq_no_if_needed(uint32 domain_id, uint64 seq_no);
   int write_to_iocache(IO_CACHE *dest);
   int read_from_iocache(IO_CACHE *src);

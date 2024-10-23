@@ -1,6 +1,6 @@
 /*
    Copyright (c) 2000, 2015, Oracle and/or its affiliates.
-   Copyright (c) 2011, 2017, MariaDB
+   Copyright (c) 2011, 2022, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -63,8 +63,6 @@ static uint     opt_mysql_port= 0, opt_protocol= 0;
 static char * opt_mysql_unix_port=0;
 static char *opt_plugin_dir= 0, *opt_default_auth= 0;
 static longlong opt_ignore_lines= -1;
-
-static uint protocol_to_force= MYSQL_PROTOCOL_DEFAULT;
 
 #include <sslopt-vars.h>
 
@@ -227,9 +225,6 @@ static my_bool
 get_one_option(const struct my_option *opt, const char *argument,
                const char *filename)
 {
-  /* Track when protocol is set via CLI to not force overrides */
-  static my_bool ignore_protocol_override = FALSE;
-
   switch(opt->id) {
   case 'p':
     if (argument == disabled_my_option)
@@ -256,14 +251,6 @@ get_one_option(const struct my_option *opt, const char *argument,
   case 'W':
     opt_protocol = MYSQL_PROTOCOL_PIPE;
     opt_local_file=1;
-
-    /* Prioritize pipe if explicit via command line */
-    if (filename[0] == '\0')
-    {
-      ignore_protocol_override = TRUE;
-      protocol_to_force = MYSQL_PROTOCOL_DEFAULT;
-    }
-
     break;
 #endif
   case OPT_MYSQL_PROTOCOL:
@@ -273,45 +260,26 @@ get_one_option(const struct my_option *opt, const char *argument,
       sf_leaking_memory= 1; /* no memory leak reports here */
       exit(1);
     }
-
-    /* Specification of protocol via CLI trumps implicit overrides */
-    if (filename[0] == '\0')
-    {
-      ignore_protocol_override = TRUE;
-      protocol_to_force = MYSQL_PROTOCOL_DEFAULT;
-    }
-
     break;
   case 'P':
-    /* If port and socket are set, fall back to default behavior */
-    if (protocol_to_force == SOCKET_PROTOCOL_TO_FORCE)
+    if (filename[0] == '\0')
     {
-      ignore_protocol_override = TRUE;
-      protocol_to_force = MYSQL_PROTOCOL_DEFAULT;
-    }
-
-    /* If port is set via CLI, try to force protocol to TCP */
-    if (filename[0] == '\0' &&
-        !ignore_protocol_override &&
-        protocol_to_force == MYSQL_PROTOCOL_DEFAULT)
-    {
-      protocol_to_force = MYSQL_PROTOCOL_TCP;
+      /* Port given on command line, switch protocol to use TCP */
+      opt_protocol= MYSQL_PROTOCOL_TCP;
     }
     break;
   case 'S':
-    /* If port and socket are set, fall back to default behavior */
-    if (protocol_to_force == MYSQL_PROTOCOL_TCP)
+    if (filename[0] == '\0')
     {
-      ignore_protocol_override = TRUE;
-      protocol_to_force = MYSQL_PROTOCOL_DEFAULT;
-    }
-
-    /* Prioritize socket if set via command line */
-    if (filename[0] == '\0' &&
-        !ignore_protocol_override &&
-        protocol_to_force == MYSQL_PROTOCOL_DEFAULT)
-    {
-      protocol_to_force = SOCKET_PROTOCOL_TO_FORCE;
+      /*
+        Socket given on command line, switch protocol to use SOCKETSt
+        Except on Windows if 'protocol= pipe' has been provided in
+        the config file or command line.
+      */
+      if (opt_protocol != MYSQL_PROTOCOL_PIPE)
+      {
+        opt_protocol= MYSQL_PROTOCOL_SOCKET;
+      }
     }
     break;
   case '#':
@@ -358,7 +326,7 @@ static int get_options(int *argc, char ***argv)
   current_db= *((*argv)++);
   (*argc)--;
   if (tty_password)
-    opt_password=get_tty_password(NullS);
+    opt_password=my_get_tty_password(NullS);
   return(0);
 }
 
@@ -382,11 +350,7 @@ static int write_to_table(char *filename, MYSQL *mysql)
   {
     if (verbose)
       fprintf(stdout, "Deleting the old data from table %s\n", tablename);
-#ifdef HAVE_SNPRINTF
     snprintf(sql_statement, FN_REFLEN*16+256, "DELETE FROM %s", tablename);
-#else
-    sprintf(sql_statement, "DELETE FROM %s", tablename);
-#endif
     if (mysql_query(mysql, sql_statement))
     {
       db_error_with_table(mysql, tablename);
@@ -574,13 +538,15 @@ static void safe_exit(int error, MYSQL *mysql)
   if (mysql)
     mysql_close(mysql);
 
-  mysql_library_end();
-  free_defaults(argv_to_free);
-  my_free(opt_password);
   if (error)
     sf_leaking_memory= 1; /* dirty exit, some threads are still running */
   else
+  {
+    mysql_library_end();
+    free_defaults(argv_to_free);
+    my_free(opt_password);
     my_end(my_end_arg); /* clean exit */
+  }
   exit(error);
 }
 
@@ -624,7 +590,7 @@ static char *add_load_option(char *ptr, const char *object,
 /*
 ** Allow the user to specify field terminator strings like:
 ** "'", "\", "\\" (escaped backslash), "\t" (tab), "\n" (newline)
-** This is done by doubleing ' and add a end -\ if needed to avoid
+** This is done by doubling ' and add a end -\ if needed to avoid
 ** syntax errors from the SQL parser.
 */ 
 
@@ -710,13 +676,6 @@ int main(int argc, char **argv)
   {
     free_defaults(argv_to_free);
     return(1);
-  }
-
-  /* Command line options override configured protocol */
-  if (protocol_to_force > MYSQL_PROTOCOL_DEFAULT
-      && protocol_to_force != opt_protocol)
-  {
-    warn_protocol_override(current_host, &opt_protocol, protocol_to_force);
   }
 
   sf_leaking_memory=0; /* from now on we cleanup properly */

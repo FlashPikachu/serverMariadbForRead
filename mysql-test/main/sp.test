@@ -1,3 +1,4 @@
+--source include/no_valgrind_without_big.inc
 --source include/have_partition.inc
 --source include/have_sequence.inc
 
@@ -386,7 +387,7 @@ create function sub3(i int) returns int deterministic
 
 call sub1("sub1a", (select 7))|
 call sub1("sub1b", (select max(i) from t2))|
---error ER_OPERAND_COLUMNS
+--error ER_ILLEGAL_PARAMETER_DATA_TYPES2_FOR_OPERATION
 call sub1("sub1c", (select i,d from t2 limit 1))|
 call sub1("sub1d", (select 1 from (select 1) a))|
 call sub2("sub2")|
@@ -726,6 +727,7 @@ begin
   insert into test.t1 values (concat(x, "2"), y+2);
 end|
 
+--disable_ps2_protocol
 # Check that file does not exists
 --error 1
 --file_exists $MYSQLTEST_VARDIR/tmp/spout
@@ -733,6 +735,7 @@ call into_outfile("ofile", 1)|
 --remove_file $MYSQLTEST_VARDIR/tmp/spout
 delete from t1|
 drop procedure into_outfile|
+--enable_ps2_protocol
 
 --disable_warnings
 drop procedure if exists into_dumpfile|
@@ -1152,6 +1155,7 @@ begin
   insert into t1 values ("a", 1), ("b", 2), ("c", 3);
 end|
 
+--disable_ps2_protocol
 call rc()|
 select row_count()|
 --disable_ps_protocol
@@ -1165,7 +1169,7 @@ select row_count()|
 select * from t1|
 select row_count()|
 drop procedure rc|
-
+--enable_ps2_protocol
 
 #
 # Let us test how well new locking scheme works.
@@ -1306,6 +1310,8 @@ create function f1() returns int
   return (select sum(data) from t1)|
 
 # Let us also test some weird cases where no real tables is used
+# enable after fix MDEV-28535
+--disable_view_protocol
 create function f0() returns int
   return (select * from (select 100) as r)|
 select f0()|
@@ -1313,10 +1319,13 @@ select *, f0() from (select 1) as t|
 create view v0 as select f0()|
 select * from v0|
 select *, f0() from v0|
+--enable_view_protocol
 
 #
 # Let us test how well prelocking works with explicit LOCK TABLES.
 #
+#use disable/enable_service_connection after fix MDEV-28535
+--disable_service_connection
 lock tables t1 read, t1 as t11 read|
 # These should work well
 select f3()|
@@ -1333,9 +1342,11 @@ select id, f3() from t1|
 --error ER_TABLE_NOT_LOCKED
 select f4()|
 unlock tables|
+--enable_service_connection
 
 # Let us test how LOCK TABLES which implicitly depends on functions
 # works
+--disable_service_connection
 lock tables v2 read, mysql.proc read|
 select * from v2|
 select * from v1|
@@ -1345,6 +1356,7 @@ select * from v1, t1|
 --error ER_TABLE_NOT_LOCKED
 select f4()|
 unlock tables|
+--enable_service_connection
 
 # Tests for handling of temporary tables in functions.
 #
@@ -1368,6 +1380,7 @@ select f9()|
 select f9() from t1 limit 1|
 
 # Function which uses both temporary and permanent tables.
+--disable_view_protocol
 create function f10() returns int
 begin
   drop temporary table if exists t3;
@@ -1380,6 +1393,7 @@ end|
 select f10()|
 create table t4 as select 1 as id|
 select f10()|
+--enable_view_protocol
 
 create function f11() returns int
 begin
@@ -1655,6 +1669,7 @@ begin
   end if;
   return x;
 end|
+--disable_ps2_protocol
 select * from t1 where data = getcount("bar")|
 select * from t3|
 select getcount("zip")|
@@ -1663,6 +1678,7 @@ select * from t3|
 select getcount(id) from t1 where data = 3|
 select getcount(id) from t1 where data = 5|
 select * from t3|
+--enable_ps2_protocol
 drop table t3|
 drop function getcount|
 
@@ -3155,6 +3171,7 @@ begin
   insert into t3 values (1);
 end|
 
+--disable_ps2_protocol
 call bug4905()|
 select row_count()|
 call bug4905()|
@@ -3162,6 +3179,7 @@ select row_count()|
 call bug4905()|
 select row_count()|
 select * from t3|
+--enable_ps2_protocol
 
 drop procedure bug4905|
 drop table t3|
@@ -3759,8 +3777,10 @@ if (`select @@have_query_cache='YES'`) {
 --enable_query_log
 set @x = 1|
 insert into t1 values ("qc", 42)|
+--disable_ps2_protocol
 select bug9902() from t1|
 select bug9902() from t1|
+--enable_ps2_protocol
 select @x|
 
 --echo # Restore the old query cache size
@@ -5998,6 +6018,7 @@ SHOW CREATE FUNCTION bug16211_f2|
 SHOW CREATE FUNCTION mysqltest2.bug16211_f3|
 SHOW CREATE FUNCTION mysqltest2.bug16211_f4|
 
+--disable_service_connection
 SELECT dtd_identifier
 FROM INFORMATION_SCHEMA.ROUTINES
 WHERE ROUTINE_SCHEMA = "mysqltest1" AND ROUTINE_NAME = "bug16211_f1"|
@@ -6013,6 +6034,7 @@ WHERE ROUTINE_SCHEMA = "mysqltest2" AND ROUTINE_NAME = "bug16211_f3"|
 SELECT dtd_identifier
 FROM INFORMATION_SCHEMA.ROUTINES
 WHERE ROUTINE_SCHEMA = "mysqltest2" AND ROUTINE_NAME = "bug16211_f4"|
+--enable_service_connection
 
 SELECT CHARSET(bug16211_f1())|
 SELECT CHARSET(bug16211_f2())|
@@ -6226,7 +6248,9 @@ CREATE FUNCTION bug19862(x INT) RETURNS INT
     RETURN x+1;
   END|
 INSERT INTO t12 VALUES (1), (2)|
+--disable_ps2_protocol
 SELECT bug19862(a) FROM t12 ORDER BY 1|
+--enable_ps2_protocol
 SELECT * FROM t11|
 DROP TABLE t11, t12|
 DROP FUNCTION bug19862|
@@ -6791,7 +6815,9 @@ END|
 CREATE FUNCTION bug23760_rc_test(in_var INT) RETURNS INT RETURN in_var|
 
 INSERT INTO bug23760 (num) VALUES (0), (1), (1), (2), (3), (5), (8)|
+--disable_ps2_protocol
 SELECT ROW_COUNT()|
+--enable_ps2_protocol
 
 CALL bug23760_test_row_count()|
 SELECT * FROM bug23760_log ORDER BY id|
@@ -6801,14 +6827,18 @@ SELECT @save_max_sp_recursion|
 SET max_sp_recursion_depth= 5|
 SELECT @@max_sp_recursion_depth|
 CALL bug23760_test_row_count2(2)|
+--disable_ps2_protocol
 SELECT ROW_COUNT()|
+--enable_ps2_protocol
 SELECT * FROM bug23760_log ORDER BY id|
 SELECT * FROM bug23760 ORDER by ID|
 SET max_sp_recursion_depth= @save_max_sp_recursion|
 
 SELECT bug23760_rc_test(123)|
 INSERT INTO bug23760 (num) VALUES (13), (21), (34), (55)|
+--disable_ps2_protocol
 SELECT bug23760_rc_test(ROW_COUNT())|
+--enable_ps2_protocol
 
 DROP TABLE bug23760, bug23760_log|
 DROP PROCEDURE bug23760_update_log|
@@ -10506,6 +10536,59 @@ DROP TABLE t1;
 
 --echo # End of 10.4 tests
 --echo #
+
+--echo #
+--echo # MDEV-29129: Performance regression starting in 10.6: unlimited "select order by limit"
+--echo #
+
+CREATE TABLE t1 (
+  lookupId int primary key,
+  value varchar(255)
+);
+insert into t1 select seq, seq from seq_1_to_100;
+
+-- echo # Note: the function is intentionally NOT declared as DETERMINISTIC
+delimiter //;
+CREATE FUNCTION f1(LOOKUPID_IN INT) RETURNS varchar(255) CHARSET utf8
+BEGIN
+  DECLARE LOOKUP_VALUE VARCHAR(255);
+  SET LOOKUP_VALUE = (SELECT value FROM t1 WHERE lookupId = LOOKUPID_IN);
+  set @counter=@counter+1;
+  RETURN LOOKUP_VALUE;
+END; 
+//
+delimiter ;//
+
+create table t2 (
+  col1 int,
+  col2 int
+);
+insert into t2 select mod(seq,100), seq from seq_1_to_1000;
+
+explain 
+select f1(col1) from t2 order by col2 desc limit 5;
+set @counter=0;
+select f1(col1) from t2 order by col2 desc limit 5;
+--echo # Must show 5, not 1000:
+select @counter;
+drop function f1;
+drop table t1,t2;
+
+--echo # 
+--echo # MDEV-31877: ASAN errors in Exec_time_tracker::get_cycles with innodb slow log verbosity
+--echo # 
+CREATE TABLE t1 (a INT, b INT);
+INSERT INTO t1 VALUES (1,2);
+SET @tmp=@@log_slow_verbosity;
+SET SESSION log_slow_verbosity= 'innodb';
+--delimiter $
+BEGIN NOT ATOMIC DECLARE r ROW TYPE OF t1 DEFAULT (SELECT * FROM t1); SELECT r.a; END $
+--delimiter ;
+
+SET SESSION log_slow_verbosity= @tmp;
+# Cleanup
+DROP TABLE t1;
+
 
 --echo #
 --echo # MDEV-28129: MariaDB UAF issue at lex_end_nops(LEX*)

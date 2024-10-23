@@ -41,8 +41,6 @@ static char *opt_plugin_dir= 0, *opt_default_auth= 0;
 
 static uint opt_protocol=0;
 
-static uint protocol_to_force= MYSQL_PROTOCOL_DEFAULT;
-
 static void get_options(int *argc,char ***argv);
 static uint opt_mysql_port=0;
 static int list_dbs(MYSQL *mysql,const char *wild);
@@ -80,14 +78,6 @@ int main(int argc, char **argv)
   defaults_argv=argv;
 
   get_options(&argc,&argv);
-
-
-  /* Command line options override configured protocol */
-  if (protocol_to_force > MYSQL_PROTOCOL_DEFAULT
-      && protocol_to_force != opt_protocol)
-  {
-    warn_protocol_override(host, &opt_protocol, protocol_to_force);
-  }
 
   sf_leaking_memory=0; /* from now on we cleanup properly */
   wild=0;
@@ -308,9 +298,6 @@ get_one_option(const struct my_option *opt, const char *argument,
                const char *filename)
 {
 
-  /* Track when protocol is set via CLI to not force overrides */
-  static my_bool ignore_protocol_override = FALSE;
-
   switch(opt->id) {
   case 'v':
     opt_verbose++;
@@ -339,13 +326,6 @@ get_one_option(const struct my_option *opt, const char *argument,
   case 'W':
 #ifdef _WIN32
     opt_protocol = MYSQL_PROTOCOL_PIPE;
-
-    /* Prioritize pipe if explicit via command line */
-    if (filename[0] == '\0')
-    {
-      ignore_protocol_override = TRUE;
-      protocol_to_force = MYSQL_PROTOCOL_DEFAULT;
-    }
 #endif
     break;
   case OPT_MYSQL_PROTOCOL:
@@ -355,46 +335,28 @@ get_one_option(const struct my_option *opt, const char *argument,
       sf_leaking_memory= 1; /* no memory leak reports here */
       exit(1);
     }
-
-    /* Specification of protocol via CLI trumps implicit overrides */
-    if (filename[0] == '\0')
-    {
-      ignore_protocol_override = TRUE;
-      protocol_to_force = MYSQL_PROTOCOL_DEFAULT;
-    }
-
     break;
   case 'P':
-    /* If port and socket are set, fall back to default behavior */
-    if (protocol_to_force == SOCKET_PROTOCOL_TO_FORCE)
+    if (filename[0] == '\0')
     {
-      ignore_protocol_override = TRUE;
-      protocol_to_force = MYSQL_PROTOCOL_DEFAULT;
-    }
-
-    /* If port is set via CLI, try to force protocol to TCP */
-    if (filename[0] == '\0' &&
-        !ignore_protocol_override &&
-        protocol_to_force == MYSQL_PROTOCOL_DEFAULT)
-    {
-      protocol_to_force = MYSQL_PROTOCOL_TCP;
+      /* Port given on command line, switch protocol to use TCP */
+      opt_protocol= MYSQL_PROTOCOL_TCP;
     }
     break;
   case 'S':
-    /* If port and socket are set, fall back to default behavior */
-    if (protocol_to_force == MYSQL_PROTOCOL_TCP)
+    if (filename[0] == '\0')
     {
-      ignore_protocol_override = TRUE;
-      protocol_to_force = MYSQL_PROTOCOL_DEFAULT;
+      /*
+        Socket given on command line, switch protocol to use SOCKETSt
+        Except on Windows if 'protocol= pipe' has been provided in
+        the config file or command line.
+      */
+      if (opt_protocol != MYSQL_PROTOCOL_PIPE)
+      {
+        opt_protocol= MYSQL_PROTOCOL_SOCKET;
+      }
     }
-
-    /* Prioritize socket if set via command line */
-    if (filename[0] == '\0' &&
-        !ignore_protocol_override &&
-        protocol_to_force == MYSQL_PROTOCOL_DEFAULT)
-    {
-      protocol_to_force = SOCKET_PROTOCOL_TO_FORCE;
-    }
+    break;
     break;
   case '#':
     DBUG_PUSH(argument ? argument : "d:t:o");
@@ -423,7 +385,7 @@ get_options(int *argc,char ***argv)
     exit(ho_error);
   
   if (tty_password)
-    opt_password=get_tty_password(NullS);
+    opt_password=my_get_tty_password(NullS);
   if (opt_count)
   {
     /*
@@ -507,7 +469,7 @@ list_dbs(MYSQL *mysql,const char *wild)
 	MYSQL_RES *tresult = mysql_list_tables(mysql,(char*)NULL);
 	if (mysql_affected_rows(mysql) > 0)
 	{
-	  sprintf(tables,"%6lu",(ulong) mysql_affected_rows(mysql));
+	  snprintf(tables, sizeof(tables), "%6lu",(ulong) mysql_affected_rows(mysql));
 	  rowcount = 0;
 	  if (opt_verbose > 1)
 	  {
@@ -528,13 +490,13 @@ list_dbs(MYSQL *mysql,const char *wild)
 		}
 	      }
 	    }
-	    sprintf(rows,"%12lu",rowcount);
+	    snprintf(rows, sizeof(rows), "%12lu", rowcount);
 	  }
 	}
 	else
 	{
-	  sprintf(tables,"%6d",0);
-	  sprintf(rows,"%12d",0);
+	  snprintf(tables, sizeof(tables), "%6d" ,0);
+	  snprintf(rows, sizeof(rows), "%12d", 0);
 	}
 	mysql_free_result(tresult);
       }
@@ -652,7 +614,7 @@ list_tables(MYSQL *mysql,const char *db,const char *table)
 	}
 	else
 	{
-	  sprintf(fields,"%8u",(uint) mysql_num_fields(rresult));
+	  snprintf(fields, sizeof(fields), "%8u", (uint) mysql_num_fields(rresult));
 	  mysql_free_result(rresult);
 
 	  if (opt_verbose > 1)
@@ -668,10 +630,10 @@ list_tables(MYSQL *mysql,const char *db,const char *table)
 		rowcount += (unsigned long) strtoull(rrow[0], (char**) 0, 10);
 		mysql_free_result(rresult);
 	      }
-	      sprintf(rows,"%10lu",rowcount);
+	      snprintf(rows, sizeof(rows), "%10lu", rowcount);
 	    }
 	    else
-	      sprintf(rows,"%10d",0);
+	      snprintf(rows, sizeof(rows), "%10d", 0);
 	  }
 	}
       }

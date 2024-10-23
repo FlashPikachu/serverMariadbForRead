@@ -1,4 +1,4 @@
-/* Copyright (C) 2013-2021 Codership Oy <info@codership.com>
+/* Copyright (C) 2013-2023 Codership Oy <info@codership.com>
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -88,7 +88,38 @@ bool wsrep_create_appliers(long threads, bool mutex_protected=false);
 void wsrep_create_rollbacker();
 
 bool wsrep_bf_abort(THD* bf_thd, THD* victim_thd);
-int  wsrep_abort_thd(THD *bf_thd_ptr, THD *victim_thd_ptr, my_bool signal);
+/*
+  Abort transaction for victim_thd. This function is called from
+  MDL BF abort codepath.
+*/
+void wsrep_abort_thd(THD *bf_thd,
+                     THD *victim_thd,
+                     my_bool signal) __attribute__((nonnull(1,2)));
+
+/**
+  Kill wsrep connection with kill_signal. Object thd is not
+  guaranteed to exist anymore when this function returns.
+
+  Asserts that the caller holds victim_thd->LOCK_thd_kill,
+  victim_thd->LOCK_thd_data.
+
+  @param thd THD object for connection that executes the KILL.
+  @param victim_thd THD object for connection to be killed.
+  @param kill_signal Kill signal.
+
+  @return Zero if the kill was successful, otherwise non-zero error code.
+ */
+uint wsrep_kill_thd(THD *thd, THD *victim_thd, killed_state kill_signal);
+
+/*
+  Backup kill status for commit.
+ */
+void wsrep_backup_kill_for_commit(THD *);
+
+/*
+  Restore KILL status after commit.
+ */
+void wsrep_restore_kill_after_commit(THD *);
 
 /*
   Helper methods to deal with thread local storage.
@@ -182,9 +213,8 @@ void wsrep_reset_threadvars(THD *);
      so don't override those by default
  */
 
-static inline void wsrep_override_error(THD *thd, uint error)
+static inline void wsrep_override_error(THD *thd, uint error, const char *format= 0, ...)
 {
-  DBUG_ASSERT(error != ER_ERROR_DURING_COMMIT);
   Diagnostics_area *da= thd->get_stmt_da();
   if (da->is_ok() ||
       da->is_eof() ||
@@ -195,26 +225,11 @@ static inline void wsrep_override_error(THD *thd, uint error)
        da->sql_errno() != ER_LOCK_DEADLOCK))
   {
     da->reset_diagnostics_area();
-    my_error(error, MYF(0));
-  }
-}
-
-/**
-   Override error with additional wsrep status.
- */
-static inline void wsrep_override_error(THD *thd, uint error,
-                                        enum wsrep::provider::status status)
-{
-  Diagnostics_area *da= thd->get_stmt_da();
-  if (da->is_ok() ||
-      !da->is_set() ||
-      (da->is_error() &&
-       da->sql_errno() != error &&
-       da->sql_errno() != ER_ERROR_DURING_COMMIT &&
-       da->sql_errno() != ER_LOCK_DEADLOCK))
-  {
-    da->reset_diagnostics_area();
-    my_error(error, MYF(0), status);
+    va_list args;
+    va_start(args, format);
+    if (!format) format= ER_THD(thd, error);
+    my_printv_error(error, format, MYF(0), args);
+    va_end(args);
   }
 }
 
@@ -226,7 +241,10 @@ static inline void wsrep_override_error(THD* thd,
     switch (ce)
     {
     case wsrep::e_error_during_commit:
-      wsrep_override_error(thd, ER_ERROR_DURING_COMMIT, status);
+      if (status == wsrep::provider::error_size_exceeded)
+        wsrep_override_error(thd, ER_UNKNOWN_ERROR, "Maximum writeset size exceeded");
+      else
+        wsrep_override_error(thd, ER_ERROR_DURING_COMMIT, 0, status);
       break;
     case wsrep::e_deadlock_error:
       wsrep_override_error(thd, ER_LOCK_DEADLOCK);
@@ -235,11 +253,18 @@ static inline void wsrep_override_error(THD* thd,
       wsrep_override_error(thd, ER_QUERY_INTERRUPTED);
       break;
     case wsrep::e_size_exceeded_error:
-      wsrep_override_error(thd, ER_ERROR_DURING_COMMIT, status);
+      wsrep_override_error(thd, ER_UNKNOWN_ERROR, "Maximum writeset size exceeded");
       break;
     case wsrep::e_append_fragment_error:
       /* TODO: Figure out better error number */
-      wsrep_override_error(thd, ER_ERROR_DURING_COMMIT, status);
+      if (status)
+        wsrep_override_error(thd, ER_ERROR_DURING_COMMIT,
+                             "Error while appending streaming replication fragment"
+                             "(provider status: %s)",
+                             wsrep::provider::to_string(status).c_str());
+      else
+        wsrep_override_error(thd, ER_ERROR_DURING_COMMIT,
+                             "Error while appending streaming replication fragment");
       break;
     case wsrep::e_not_supported_error:
       wsrep_override_error(thd, ER_NOT_SUPPORTED_YET);

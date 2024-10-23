@@ -61,9 +61,9 @@ Every change to a contents of a data page must be done
 through mtr_t, and mtr_t::commit() will write log records
 to the InnoDB redo log. */
 
-MY_ALIGNED(CPU_LEVEL1_DCACHE_LINESIZE)
+alignas(CPU_LEVEL1_DCACHE_LINESIZE)
 static group_commit_lock flush_lock;
-MY_ALIGNED(CPU_LEVEL1_DCACHE_LINESIZE)
+alignas(CPU_LEVEL1_DCACHE_LINESIZE)
 static group_commit_lock write_lock;
 
 /** Redo log system */
@@ -152,7 +152,8 @@ dberr_t log_file_t::close() noexcept
 dberr_t log_file_t::read(os_offset_t offset, span<byte> buf) noexcept
 {
   ut_ad(is_opened());
-  return os_file_read(IORequestRead, m_file, buf.data(), offset, buf.size());
+  return os_file_read(IORequestRead, m_file, buf.data(), offset, buf.size(),
+                      nullptr);
 }
 
 void log_file_t::write(os_offset_t offset, span<const byte> buf) noexcept
@@ -209,7 +210,7 @@ void log_t::attach(log_file_t file, os_offset_t size)
 #ifdef HAVE_PMEM
   ut_ad(!buf);
   ut_ad(!flush_buf);
-  if (size && !(size_t(size) & 4095))
+  if (size && !(size_t(size) & 4095) && srv_operation != SRV_OPERATION_BACKUP)
   {
     void *ptr= log_mmap(log.m_file, size);
     if (ptr != MAP_FAILED)
@@ -220,6 +221,8 @@ void log_t::attach(log_file_t file, os_offset_t size)
 #if defined __linux__ || defined _WIN32
       set_block_size(CPU_LEVEL1_DCACHE_LINESIZE);
 #endif
+      log_maybe_unbuffered= true;
+      log_buffered= false;
       return;
     }
   }
@@ -231,18 +234,11 @@ void log_t::attach(log_file_t file, os_offset_t size)
 #endif
 
 #if defined __linux__ || defined _WIN32
-  if (!block_size)
-    set_block_size(512);
-# ifdef __linux__
-  else if (srv_file_flush_method != SRV_O_DSYNC &&
-           srv_file_flush_method != SRV_O_DIRECT &&
-           srv_file_flush_method != SRV_O_DIRECT_NO_FSYNC)
-    sql_print_information("InnoDB: Buffered log writes (block size=%u bytes)",
-                          block_size);
-#endif
-  else
-    sql_print_information("InnoDB: File system buffers for log"
-                          " disabled (block size=%u bytes)", block_size);
+  sql_print_information("InnoDB: %s (block size=%u bytes)",
+                        log_buffered
+                        ? "Buffered log writes"
+                        : "File system buffers for log disabled",
+                        block_size);
 #endif
 
 #ifdef HAVE_PMEM
@@ -347,7 +343,7 @@ void log_t::close_file()
       ib::fatal() << "closing ib_logfile0 failed: " << err;
 }
 
-/** Acquire the latches that protect log resizing. */
+/** Acquire all latches that protect the log. */
 static void log_resize_acquire()
 {
   if (!log_sys.is_pmem())
@@ -361,7 +357,7 @@ static void log_resize_acquire()
   log_sys.latch.wr_lock(SRW_LOCK_CALL);
 }
 
-/** Release the latches that protect log resizing. */
+/** Release the latches that protect the log. */
 void log_resize_release()
 {
   log_sys.latch.wr_unlock();
@@ -374,6 +370,34 @@ void log_resize_release()
       log_write_up_to(std::max(lsn1, lsn2), true, nullptr);
   }
 }
+
+#if defined __linux__ || defined _WIN32
+/** Try to enable or disable file system caching (update log_buffered) */
+void log_t::set_buffered(bool buffered)
+{
+  if (!log_maybe_unbuffered || is_pmem() || high_level_read_only)
+    return;
+  log_resize_acquire();
+  if (!resize_in_progress() && is_opened() && bool(log_buffered) != buffered)
+  {
+    os_file_close_func(log.m_file);
+    log.m_file= OS_FILE_CLOSED;
+    std::string path{get_log_file_path()};
+    log_buffered= buffered;
+    bool success;
+    log.m_file= os_file_create_func(path.c_str(),
+                                    OS_FILE_OPEN, OS_FILE_NORMAL, OS_LOG_FILE,
+                                    false, &success);
+    ut_a(log.m_file != OS_FILE_CLOSED);
+    sql_print_information("InnoDB: %s (block size=%u bytes)",
+                          log_buffered
+                          ? "Buffered log writes"
+                          : "File system buffers for log disabled",
+                          block_size);
+  }
+  log_resize_release();
+}
+#endif
 
 /** Start resizing the log and release the exclusive latch.
 @param size  requested new file_size
@@ -473,7 +497,14 @@ log_t::resize_start_status log_t::resize_start(os_offset_t size) noexcept
   log_resize_release();
 
   if (start_lsn)
+  {
+    mysql_mutex_lock(&buf_pool.flush_list_mutex);
+    lsn_t target_lsn= buf_pool.get_oldest_modification(0);
+    if (start_lsn < target_lsn)
+      start_lsn= target_lsn + 1;
+    mysql_mutex_unlock(&buf_pool.flush_list_mutex);
     buf_flush_ahead(start_lsn, false);
+  }
 
   return status;
 }
@@ -985,10 +1016,14 @@ func_exit:
 
     if (lsn <= sync_lsn)
     {
+#ifndef DBUG_OFF
+    skip_checkpoint:
+#endif
       log_sys.set_check_flush_or_checkpoint(false);
       goto func_exit;
     }
 
+    DBUG_EXECUTE_IF("ib_log_checkpoint_avoid_hard", goto skip_checkpoint;);
     log_sys.latch.rd_unlock();
 
     /* We must wait to prevent the tail of the log overwriting the head. */
@@ -1012,6 +1047,16 @@ ATTRIBUTE_COLD void log_check_margins()
     ut_ad(!recv_no_log_write);
   }
   while (log_sys.check_flush_or_checkpoint());
+}
+
+/** Wait for a log checkpoint if needed.
+NOTE that this function may only be called while not holding
+any synchronization objects except dict_sys.latch. */
+void log_free_check()
+{
+  ut_ad(!lock_sys.is_writer());
+  if (log_sys.check_flush_or_checkpoint())
+    log_check_margins();
 }
 
 extern void buf_resize_shutdown();
@@ -1085,13 +1130,9 @@ loop:
 	}
 
 	/* We need these threads to stop early in shutdown. */
-	const char* thread_name;
-
-   if (srv_fast_shutdown != 2 && trx_rollback_is_active) {
-		thread_name = "rollback of recovered transactions";
-	} else {
-		thread_name = NULL;
-	}
+	const char* thread_name = srv_fast_shutdown != 2
+		&& trx_rollback_is_active
+		? "rollback of recovered transactions" : nullptr;
 
 	if (thread_name) {
 		ut_ad(!srv_read_only_mode);
@@ -1126,22 +1167,15 @@ wait_suspend_loop:
 
 	if (!buf_pool.is_initialised()) {
 		ut_ad(!srv_was_started);
-	} else if (ulint pending_io = buf_pool.io_pending()) {
-		if (srv_print_verbose_log && count > 600) {
-			ib::info() << "Waiting for " << pending_io << " buffer"
-				" page I/Os to complete";
-			count = 0;
-		}
-
-		goto loop;
 	} else {
 		buf_flush_buffer_pool();
 	}
 
 	if (srv_fast_shutdown == 2 || !srv_was_started) {
 		if (!srv_read_only_mode && srv_was_started) {
-			ib::info() << "Executing innodb_fast_shutdown=2."
-				" Next startup will execute crash recovery!";
+			sql_print_information(
+				"InnoDB: Executing innodb_fast_shutdown=2."
+				" Next startup will execute crash recovery!");
 
 			/* In this fastest shutdown we do not flush the
 			buffer pool:

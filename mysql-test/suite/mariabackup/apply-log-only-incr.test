@@ -1,4 +1,5 @@
 --source include/have_innodb.inc
+--source include/innodb_undo_tablespaces.inc
 
 call mtr.add_suppression("InnoDB: New log files created");
 
@@ -61,7 +62,9 @@ rmdir $incremental_dir;
 
 SELECT COUNT(*) FROM t;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+--disable_ps2_protocol
 SELECT COUNT(*) FROM t;
+--enable_ps2_protocol
 
 --let $restart_parameters=
 --source include/restart_mysqld.inc

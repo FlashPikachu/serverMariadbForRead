@@ -1,6 +1,6 @@
 /*
    Copyright (c) 2001, 2012, Oracle and/or its affiliates.
-   Copyright (c) 2009, 2020, MariaDB
+   Copyright (c) 2009, 2022, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -102,6 +102,7 @@ enum options_client
   OPT_IGNORE_DATA,
   OPT_PRINT_ROW_COUNT, OPT_PRINT_ROW_EVENT_POSITIONS,
   OPT_CHECK_IF_UPGRADE_NEEDED,
+  OPT_COMPATIBILTY_CLEARTEXT_PLUGIN,
   OPT_SHUTDOWN_WAIT_FOR_SLAVES,
   OPT_COPY_S3_TABLES,
   OPT_PRINT_TABLE_METADATA,
@@ -152,51 +153,3 @@ enum options_client
 #else
 #define SOCKET_PROTOCOL_TO_FORCE MYSQL_PROTOCOL_PIPE
 #endif
-
-/**
-  Utility function to implicitly change the connection protocol to a
-  consistent value given the command line arguments.  Additionally,
-  warns the user that the protocol has been changed.
-
-  Arguments:
-    @param [in] host              Name of the host to connect to
-    @param [in, out] opt_protocol Location of the protocol option
-                                  variable to update
-    @param [in] new_protocol      New protocol to force
-*/
-static inline void warn_protocol_override(char *host,
-                                          uint *opt_protocol,
-                                          uint new_protocol)
-{
-  DBUG_ASSERT(new_protocol == MYSQL_PROTOCOL_TCP
-      || new_protocol == SOCKET_PROTOCOL_TO_FORCE);
-
-
-  if ((host == NULL
-        || strncmp(host, LOCAL_HOST, sizeof(LOCAL_HOST)-1) == 0))
-  {
-    const char *protocol_name;
-
-    if (*opt_protocol == MYSQL_PROTOCOL_DEFAULT
-#ifndef _WIN32
-        && new_protocol == MYSQL_PROTOCOL_SOCKET
-#else
-        && new_protocol == MYSQL_PROTOCOL_TCP
-#endif
-    )
-    {
-      /* This is already the default behavior, do nothing */
-      return;
-    }
-
-    protocol_name= sql_protocol_typelib.type_names[new_protocol-1];
-
-    fprintf(stderr, "%s %s %s\n",
-        "WARNING: Forcing protocol to ",
-        protocol_name,
-        " due to option specification. "
-          "Please explicitly state intended protocol.");
-
-    *opt_protocol = new_protocol;
-  }
-}

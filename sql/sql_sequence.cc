@@ -26,6 +26,9 @@
 #include "transaction.h"
 #include "lock.h"
 #include "sql_acl.h"
+#ifdef WITH_WSREP
+#include "wsrep_mysqld.h"
+#endif
 
 struct Field_definition
 {
@@ -701,7 +704,9 @@ longlong SEQUENCE::next_value(TABLE *table, bool second_round, int *error)
 {
   longlong res_value, org_reserved_until, add_to;
   bool out_of_values;
+  THD *thd= table->in_use;
   DBUG_ENTER("SEQUENCE::next_value");
+  DBUG_ASSERT(thd);
 
   *error= 0;
   if (!second_round)
@@ -766,7 +771,8 @@ longlong SEQUENCE::next_value(TABLE *table, bool second_round, int *error)
     DBUG_RETURN(next_value(table, 1, error));
   }
 
-  if (unlikely((*error= write(table, 0))))
+  if (unlikely((*error= write(table, thd->variables.binlog_row_image !=
+                                         BINLOG_ROW_IMAGE_MINIMAL))))
   {
     reserved_until= org_reserved_until;
     next_free_value= res_value;
@@ -833,7 +839,9 @@ int SEQUENCE::set_value(TABLE *table, longlong next_val, ulonglong next_round,
   longlong org_reserved_until=  reserved_until;
   longlong org_next_free_value= next_free_value;
   ulonglong org_round= round;
+  THD *thd= table->in_use;
   DBUG_ENTER("SEQUENCE::set_value");
+  DBUG_ASSERT(thd);
 
   write_lock(table);
   if (is_used)
@@ -872,7 +880,8 @@ int SEQUENCE::set_value(TABLE *table, longlong next_val, ulonglong next_round,
       needs_to_be_stored)
   {
     reserved_until= next_free_value;
-    if (write(table, 0))
+    if (write(table,
+              thd->variables.binlog_row_image != BINLOG_ROW_IMAGE_MINIMAL))
     {
       reserved_until=  org_reserved_until;
       next_free_value= org_next_free_value;
@@ -888,6 +897,20 @@ end:
   DBUG_RETURN(error);
 }
 
+#if defined(HAVE_REPLICATION)
+class wait_for_commit_raii
+{
+private:
+  THD *m_thd;
+  wait_for_commit *m_wfc;
+
+public:
+  wait_for_commit_raii(THD* thd) :
+      m_thd(thd), m_wfc(thd->suspend_subsequent_commits())
+    {}
+  ~wait_for_commit_raii() { m_thd->resume_subsequent_commits(m_wfc); }
+};
+#endif
 
 bool Sql_cmd_alter_sequence::execute(THD *thd)
 {
@@ -900,6 +923,10 @@ bool Sql_cmd_alter_sequence::execute(THD *thd)
   SEQUENCE *seq;
   No_such_table_error_handler no_such_table_handler;
   DBUG_ENTER("Sql_cmd_alter_sequence::execute");
+#if defined(HAVE_REPLICATION)
+  /* No wakeup():s of subsequent commits is allowed in this function. */
+  wait_for_commit_raii suspend_wfc(thd);
+#endif
 
   if (check_access(thd, ALTER_ACL, first_table->db.str,
                    &first_table->grant.privilege,
@@ -911,12 +938,20 @@ bool Sql_cmd_alter_sequence::execute(THD *thd)
     DBUG_RETURN(TRUE);                  /* purecov: inspected */
 
 #ifdef WITH_WSREP
-  if (WSREP_ON && WSREP(thd) &&
-      wsrep_to_isolation_begin(thd, first_table->db.str,
-	                       first_table->table_name.str,
-		               first_table))
-    DBUG_RETURN(TRUE);
+  if (WSREP(thd) && wsrep_thd_is_local(thd))
+  {
+    if (wsrep_check_sequence(thd, new_seq))
+      DBUG_RETURN(TRUE);
+
+    if (wsrep_to_isolation_begin(thd, first_table->db.str,
+                                 first_table->table_name.str,
+                                 first_table))
+    {
+      DBUG_RETURN(TRUE);
+    }
+  }
 #endif /* WITH_WSREP */
+
   if (if_exists())
     thd->push_internal_handler(&no_such_table_handler);
   error= open_and_lock_tables(thd, first_table, FALSE, 0);
@@ -995,6 +1030,11 @@ bool Sql_cmd_alter_sequence::execute(THD *thd)
     error= 1;
   if (trans_commit_implicit(thd))
     error= 1;
+  DBUG_EXECUTE_IF("hold_worker_on_schedule",
+                  {
+                    /* delay binlogging of a parent trx in rpl_parallel_seq */
+                    my_sleep(100000);
+                  });
   if (likely(!error))
     error= write_bin_log(thd, 1, thd->query(), thd->query_length());
   if (likely(!error))

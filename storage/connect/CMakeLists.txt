@@ -17,7 +17,7 @@ IF(WITHOUT_DYNAMIC_PLUGINS OR WITH_NONE OR ("${PLUGIN_CONNECT}" STREQUAL "NO"))
   RETURN()
 ENDIF()
 
-SET(CPACK_RPM_connect-engine_PACKAGE_SUMMARY "Connect storage engine for MariaDB" PARENT_SCOPE)
+SET(CPACK_RPM_connect-engine_PACKAGE_SUMMARY "Connect storage engine for MariaDB server" PARENT_SCOPE)
 SET(CPACK_RPM_connect-engine_PACKAGE_DESCRIPTION "Connect engine supports a number of file formats (dbf, xml, txt, bin, etc),
 connections to ODBC tables and remote MySQL tables, as well as a number of
 other interesting features." PARENT_SCOPE)
@@ -69,6 +69,7 @@ IF(UNIX)
     DISABLE_WARNING("format-truncation")
     DISABLE_WARNING("implicit-fallthrough")
     DISABLE_WARNING("type-limits")
+    DISABLE_WARNING("deprecated-declarations")
   endif(NOT WITH_WARNINGS)
 
   add_definitions( -DUNIX -DLINUX -DUBUNTU )
@@ -270,9 +271,11 @@ OPTION(CONNECT_WITH_JDBC "Compile CONNECT storage engine with JDBC support" ON)
 
 IF(CONNECT_WITH_JDBC)
   FIND_PACKAGE(Java 1.6)
-  SET_PACKAGE_PROPERTIES(Java PROPERTIES TYPE OPTIONAL)
+  SET_PACKAGE_PROPERTIES(Java PROPERTIES TYPE OPTIONAL
+    PURPOSE "Required for the CONNECT_JDBC feature")
   FIND_PACKAGE(JNI)
-  SET_PACKAGE_PROPERTIES(JNI PROPERTIES TYPE OPTIONAL)
+  SET_PACKAGE_PROPERTIES(JNI PROPERTIES TYPE OPTIONAL
+    PURPOSE "Required for the CONNECT_JDBC feature")
   IF (JAVA_FOUND AND JNI_FOUND)
     INCLUDE(UseJava)
     INCLUDE_DIRECTORIES(${JAVA_INCLUDE_PATH})
@@ -361,26 +364,26 @@ IF(CONNECT_WITH_REST)
 # MESSAGE(STATUS "=====> REST support is ON")
   SET(CONNECT_SOURCES ${CONNECT_SOURCES} tabrest.cpp tabrest.h)
   add_definitions(-DREST_SUPPORT)
-# FIND_PACKAGE(cpprestsdk QUIET)
-# IF (cpprestsdk_FOUND)
+#  FIND_PACKAGE(cpprestsdk QUIET)
+#  IF (cpprestsdk_FOUND)
 #	IF(UNIX)
-##    INCLUDE_DIRECTORIES(${CPPRESTSDK_INCLUDE_DIR})
-##    If needed edit next line to set the path to libcpprest.so
-#     SET(REST_LIBRARY -lcpprest)
-#     MESSAGE (STATUS ${REST_LIBRARY})
+##     INCLUDE_DIRECTORIES(${CPPRESTSDK_INCLUDE_DIR})
+##     If needed edit next line to set the path to libcpprest.so
+#      SET(REST_LIBRARY -lcpprest)
+#      MESSAGE (STATUS ${REST_LIBRARY})
 #	ELSE(NOT UNIX)
-##    Next line sets debug compile mode matching cpprest_2_10d.dll
-##    when it was binary installed (can be change later in Visual Studio)
-##    Comment it out if not needed depending on your cpprestsdk installation.
+##     Next line sets debug compile mode matching cpprest_2_10d.dll
+##     when it was binary installed (can be change later in Visual Studio)
+##     Comment it out if not needed depending on your cpprestsdk installation.
 #	  SET(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} /MDd")
 #	ENDIF(UNIX)
-##  IF(REST_LIBRARY)     why this? how about Windows
-#   SET(CONNECT_SOURCES ${CONNECT_SOURCES} restget.cpp)
-#   add_definitions(-DREST_SOURCE)
-##  ENDIF()
-##ELSE(NOT cpprestsdk_FOUND)
-##  MESSAGE(STATUS "=====> cpprestsdk package not found")
-# ENDIF (cpprestsdk_FOUND)
+##   IF(REST_LIBRARY)     why this? how about Windows
+#    SET(CONNECT_SOURCES ${CONNECT_SOURCES} restget.cpp)
+#    add_definitions(-DREST_SOURCE)
+##   ENDIF()
+## ELSE(NOT cpprestsdk_FOUND)
+#   MESSAGE(STATUS "=====> cpprestsdk package not found")
+#  ENDIF (cpprestsdk_FOUND)
 ENDIF(CONNECT_WITH_REST)
 ADD_FEATURE_INFO(CONNECT_REST CONNECT_WITH_REST "Support for REST API in the CONNECT storage engine")
 
@@ -423,27 +426,21 @@ IF(MSVC AND (CMAKE_CXX_FLAGS MATCHES "/MP"))
   ENDIF()
 ENDIF()
 
-IF(WIN32)
+IF(MSVC)
   IF (libmongoc-1.0_FOUND)
     SET_TARGET_PROPERTIES(connect PROPERTIES LINK_FLAGS
       "/DELAYLOAD:libbson-1.0.dll /DELAYLOAD:libmongoc-1.0.dll")
-  ENDIF(libmongoc-1.0_FOUND)
-
-# Install some extra files that belong to connect engine
-
-  INSTALL(FILES "$<TARGET_FILE_DIR:connect>/ha_connect.lib"
-    DESTINATION ${INSTALL_PLUGINDIR} COMPONENT connect-engine)
-ENDIF(WIN32)
-
-IF(MSVC)
-  # Temporarily disable "conversion from size_t .."
+  ENDIF()
+  # Temporarily disable "conversion from size_t .." warnings
   IF(CMAKE_SIZEOF_VOID_P EQUAL 8)
     SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /wd4267")
-    SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} /wd4267")
   ENDIF()
   SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /wd4996")
   string(REPLACE "/permissive-" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+  INSTALL(FILES "$<TARGET_FILE_DIR:connect>/ha_connect.lib"
+    DESTINATION ${INSTALL_PLUGINDIR} COMPONENT connect-engine)
 ENDIF()
+
 
 IF(CONNECT_WITH_JDBC AND JAVA_FOUND AND JNI_FOUND)
   # TODO: Find how to compile and install the java wrapper classes

@@ -6,11 +6,11 @@
 --let $node_2=node_2
 --source include/auto_increment_offset_save.inc
 
---connection node_1
+--connection node_2
 set global wsrep_on=OFF;
 reset master;
 set global wsrep_on=ON;
---connection node_2
+--connection node_1
 set global wsrep_on=OFF;
 reset master;
 set global wsrep_on=ON;
@@ -74,7 +74,6 @@ let $restart_noprint=2;
 
 --connection node_2
 SELECT COUNT(*) = 2 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 't1';
---let $MASTER_MYPORT=$NODE_MYPORT_2
 --source include/show_binlog_events.inc
 
 DROP TABLE t1;

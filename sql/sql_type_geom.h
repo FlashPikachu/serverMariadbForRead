@@ -2,7 +2,7 @@
 #define SQL_TYPE_GEOM_H_INCLUDED
 /*
    Copyright (c) 2015 MariaDB Foundation
-   Copyright (c) 2019 MariaDB
+   Copyright (c) 2019, 2022, MariaDB Corporation.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -108,8 +108,7 @@ public:
   bool Column_definition_prepare_stage1(THD *thd,
                                         MEM_ROOT *mem_root,
                                         Column_definition *c,
-                                        handler *file,
-                                        ulonglong table_flags,
+                                        column_definition_type_t type,
                                         const Column_derived_attributes
                                               *derived_attr)
                                         const override;
@@ -297,7 +296,6 @@ class Type_collection_geometry: public Type_collection
 #endif
 public:
   bool init(Type_handler_data *data) override;
-  const Type_handler *handler_by_name(const LEX_CSTRING &name) const override;
   const Type_handler *aggregate_for_result(const Type_handler *a,
                                            const Type_handler *b)
                                            const override;
@@ -316,6 +314,8 @@ public:
 };
 
 extern Type_collection_geometry type_collection_geometry;
+const Type_handler *
+Type_collection_geometry_handler_by_name(const LEX_CSTRING &name);
 
 #include "field.h"
 
@@ -397,12 +397,6 @@ public:
            !table->copy_blobs;
   }
   bool is_equal(const Column_definition &new_field) const override;
-  bool can_be_converted_by_engine(const Column_definition &new_type)
-                                  const override
-  {
-    return false; // Override the Field_blob behavior
-  }
-
   int  store(const char *to, size_t length, CHARSET_INFO *charset) override;
   int  store(double nr) override;
   int  store(longlong nr, bool unsigned_val) override;

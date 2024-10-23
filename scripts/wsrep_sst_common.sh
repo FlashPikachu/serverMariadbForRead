@@ -17,7 +17,8 @@
 
 # This is a common command line parser to be sourced by other SST scripts
 
-set -ue
+trap 'exit 32' HUP PIPE
+trap 'exit 3'  INT QUIT TERM
 
 # Setting the path for some utilities on CentOS
 export PATH="$PATH:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -46,18 +47,51 @@ trim_string()
 
 trim_dir()
 {
-    local t=$(trim_string "$1")
-    if [ "$t" != '/' ]; then
-        if [ "${t%/}" != "$t" ]; then
-            t=$(trim_string "${t%/}")
+    if [ -n "$BASH_VERSION" ]; then
+        local pattern="![:space:]${2:-}"
+        local x="${1#*[$pattern]}"
+        local z=${#1}
+        x=${#x}
+        if [ $x -ne $z ]; then
+            local y="${1%[$pattern/]*}"
+            y=${#y}
+            x=$(( z-x-1 ))
+            y=$(( y-x+1 ))
+            x="${1:$x:$y}"
+            [ -z "$x" ] && x='.'
+            printf '%s' "$x"
+        else
+            printf ''
         fi
     else
-        t='.'
+        local pattern="[:space:]${2:-}"
+        local x=$(echo "$1" | sed -E "s/^[$pattern]+|[$pattern/]+\$//g")
+        if [ -n "$x" ]; then
+            echo "$x"
+        elif "${1#*/}" != "$1"; then
+            echo '.'
+        else
+            echo ''
+        fi
     fi
+}
+
+trim_right()
+{
     if [ -n "$BASH_VERSION" ]; then
-        printf '%s' "$t"
+        local pattern="[![:space:]${2:-}]"
+        local z=${#1}
+        local y="${1%$pattern*}"
+        y=${#y}
+        if [ $y -ne $z ]; then
+            y=$(( y+1 ))
+            printf '%s' "${1:0:$y}"
+        else
+            printf ''
+        fi
     else
-        echo "$t"
+        local pattern="[[:space:]${2:-}]"
+        echo "$1" | sed -E "s/$pattern+\$//g"
     fi
 }
 
@@ -79,6 +113,7 @@ to_minuses()
 }
 
 WSREP_SST_OPT_BYPASS=0
+WSREP_SST_OPT_PROGRESS=0
 WSREP_SST_OPT_BINLOG=""
 WSREP_SST_OPT_BINLOG_INDEX=""
 WSREP_SST_OPT_LOG_BASENAME=""
@@ -99,16 +134,18 @@ WSREP_SST_OPT_ADDR=""
 WSREP_SST_OPT_ADDR_PORT=""
 WSREP_SST_OPT_HOST=""
 WSREP_SST_OPT_HOST_UNESCAPED=""
+ARIA_LOG_DIR=""
 INNODB_DATA_HOME_DIR=$(trim_dir "${INNODB_DATA_HOME_DIR:-}")
 INNODB_LOG_GROUP_HOME=$(trim_dir "${INNODB_LOG_GROUP_HOME:-}")
 INNODB_UNDO_DIR=$(trim_dir "${INNODB_UNDO_DIR:-}")
+INNODB_BUFFER_POOL=""
 INNODB_FORCE_RECOVERY=""
 INNOEXTRA=""
 
 while [ $# -gt 0 ]; do
 case "$1" in
     '--address')
-        WSREP_SST_OPT_ADDR="$2"
+        WSREP_SST_OPT_ADDR=$(trim_string "$2")
         #
         # Break address string into host:port/path parts
         #
@@ -116,20 +153,22 @@ case "$1" in
         \[*)
             # IPv6
             # Remove the starting and ending square brackets, if present:
-            addr_no_bracket="${WSREP_SST_OPT_ADDR#\[}"
+            addr="${WSREP_SST_OPT_ADDR#\[}"
+            addr=$(trim_right "${addr%%\]*}")
             # Some utilities and subsequent code require an address
             # without square brackets:
-            readonly WSREP_SST_OPT_HOST_UNESCAPED="${addr_no_bracket%%\]*}"
+            readonly WSREP_SST_OPT_HOST_UNESCAPED="$addr"
             # Square brackets are needed in most cases:
-            readonly WSREP_SST_OPT_HOST="[$WSREP_SST_OPT_HOST_UNESCAPED]"
+            readonly WSREP_SST_OPT_HOST="[$addr]"
             # Mark this address as IPv6:
             readonly WSREP_SST_OPT_HOST_IPv6=1
             # Let's remove the leading part that contains the host address:
             remain="${WSREP_SST_OPT_ADDR#*\]}"
             ;;
         *)
-            readonly WSREP_SST_OPT_HOST="${WSREP_SST_OPT_ADDR%%[:/]*}"
-            readonly WSREP_SST_OPT_HOST_UNESCAPED="$WSREP_SST_OPT_HOST"
+            addr=$(trim_right "${WSREP_SST_OPT_ADDR%%[:/]*}")
+            readonly WSREP_SST_OPT_HOST="$addr"
+            readonly WSREP_SST_OPT_HOST_UNESCAPED="$addr"
             readonly WSREP_SST_OPT_HOST_IPv6=0
             # Let's remove the leading part that contains the host address:
             remain="${WSREP_SST_OPT_ADDR#*[:/]}"
@@ -151,17 +190,18 @@ case "$1" in
         else
             readonly WSREP_SST_OPT_PATH=""
         fi
+        WSREP_SST_OPT_ADDR_PORT=$(trim_right "$WSREP_SST_OPT_ADDR_PORT")
         # Remove the module name part from the string, which ends with "/":
         remain="${WSREP_SST_OPT_PATH#*/}"
         # This operation removes the tail after the very first occurrence
         # of the "/" character, inclusively:
-        readonly WSREP_SST_OPT_MODULE="${WSREP_SST_OPT_PATH%%/*}"
+        readonly WSREP_SST_OPT_MODULE=$(trim_right "${WSREP_SST_OPT_PATH%%/*}")
         # If there is one more "/" in the string, then everything before
         # it will be the LSN, otherwise the LSN is empty:
         if [ "$remain" != "$WSREP_SST_OPT_PATH" ]; then
             # Extract the part that matches the LSN by removing all
             # characters starting from the very first "/":
-            readonly WSREP_SST_OPT_LSN="${remain%%/*}"
+            readonly WSREP_SST_OPT_LSN=$(trim_right "${remain%%/*}")
             # Exctract everything after the first occurrence of
             # the "/" character in the string:
             source="$remain"
@@ -173,7 +213,7 @@ case "$1" in
                 # Let's extract the version number by removing the tail
                 # after the very first occurence of the "/" character
                 # (inclusively):
-                readonly WSREP_SST_OPT_SST_VER="${remain%%/*}"
+                readonly WSREP_SST_OPT_SST_VER=$(trim_right "${remain%%/*}")
             else
                 readonly WSREP_SST_OPT_SST_VER=""
             fi
@@ -184,11 +224,20 @@ case "$1" in
         shift
         ;;
     '--bypass')
-        WSREP_SST_OPT_BYPASS=1
+        readonly WSREP_SST_OPT_BYPASS=1
+        ;;
+    '--progress')
+        readonly WSREP_SST_OPT_PROGRESS=$(( $2 ))
+        shift
         ;;
     '--datadir')
         # Let's remove the trailing slash:
         readonly WSREP_SST_OPT_DATA=$(trim_dir "$2")
+        shift
+        ;;
+    '--aria-log-dir-path')
+        # Let's remove the trailing slash:
+        readonly ARIA_LOG_DIR=$(trim_dir "$2")
         shift
         ;;
     '--innodb-data-home-dir')
@@ -206,50 +255,59 @@ case "$1" in
         readonly INNODB_UNDO_DIR=$(trim_dir "$2")
         shift
         ;;
+    '--innodb-buffer-pool-filename')
+        readonly INNODB_BUFFER_POOL=$(trim_string "$2")
+        shift
+        ;;
     '--defaults-file')
-        readonly WSREP_SST_OPT_DEFAULT="$1=$2"
-        readonly WSREP_SST_OPT_DEFAULTS="$1='$2'"
+        file=$(trim_string "$2")
+        readonly WSREP_SST_OPT_DEFAULT="$1=$file"
+        readonly WSREP_SST_OPT_DEFAULTS="$1='$file'"
         shift
         ;;
     '--defaults-extra-file')
-        readonly WSREP_SST_OPT_EXTRA_DEFAULT="$1=$2"
-        readonly WSREP_SST_OPT_EXTRA_DEFAULTS="$1='$2'"
+        file=$(trim_string "$2")
+        readonly WSREP_SST_OPT_EXTRA_DEFAULT="$1=$file"
+        readonly WSREP_SST_OPT_EXTRA_DEFAULTS="$1='$file'"
         shift
         ;;
     '--defaults-group-suffix')
-        readonly WSREP_SST_OPT_SUFFIX_DEFAULT="$1=$2"
-        readonly WSREP_SST_OPT_SUFFIX_VALUE="$2"
+        suffix=$(trim_string "$2")
+        readonly WSREP_SST_OPT_SUFFIX_DEFAULT="$1=$suffix"
+        readonly WSREP_SST_OPT_SUFFIX_VALUE="$suffix"
         shift
         ;;
     '--host')
-        case "$2" in
+        addr=$(trim_string "$2")
+        case "$addr" in
         \[*)
             # IPv6
             # Remove the starting and ending square brackets, if present:
-            addr_no_bracket="${2#\[}"
+            addr="${addr#\[}"
+            addr=$(trim_right "${addr%%\]*}")
             # Some utilities and subsequent code require an address
             # without square brackets:
-            readonly WSREP_SST_OPT_HOST_UNESCAPED="${addr_no_bracket%%\]*}"
+            readonly WSREP_SST_OPT_HOST_UNESCAPED="$addr"
             # Square brackets are needed in most cases:
-            readonly WSREP_SST_OPT_HOST="[${WSREP_SST_OPT_HOST_UNESCAPED}]"
+            readonly WSREP_SST_OPT_HOST="[$addr]"
             # Mark this address as IPv6:
             readonly WSREP_SST_OPT_HOST_IPv6=1
             ;;
         *)
-            readonly WSREP_SST_OPT_HOST="$2"
-            readonly WSREP_SST_OPT_HOST_UNESCAPED="$2"
+            readonly WSREP_SST_OPT_HOST="$addr"
+            readonly WSREP_SST_OPT_HOST_UNESCAPED="$addr"
             readonly WSREP_SST_OPT_HOST_IPv6=0
             ;;
         esac
-        WSREP_SST_OPT_ADDR="$WSREP_SST_OPT_HOST"
+        WSREP_SST_OPT_ADDR="$addr"
         shift
         ;;
     '--local-port')
-        readonly WSREP_SST_OPT_LPORT="$2"
+        readonly WSREP_SST_OPT_LPORT=$(( $2 ))
         shift
         ;;
     '--parent')
-        readonly WSREP_SST_OPT_PARENT="$2"
+        readonly WSREP_SST_OPT_PARENT=$(( $2 ))
         shift
         ;;
     '--password')
@@ -257,15 +315,15 @@ case "$1" in
         shift
         ;;
     '--port')
-        readonly WSREP_SST_OPT_PORT="$2"
+        readonly WSREP_SST_OPT_PORT=$(( $2 ))
         shift
         ;;
     '--role')
-        readonly WSREP_SST_OPT_ROLE="$2"
+        readonly WSREP_SST_OPT_ROLE=$(trim_string "$2")
         shift
         ;;
     '--socket')
-        readonly WSREP_SST_OPT_SOCKET="$2"
+        readonly WSREP_SST_OPT_SOCKET=$(trim_string "$2")
         shift
         ;;
     '--user')
@@ -273,23 +331,23 @@ case "$1" in
         shift
         ;;
     '--gtid')
-        readonly WSREP_SST_OPT_GTID="$2"
+        readonly WSREP_SST_OPT_GTID=$(trim_string "$2")
         shift
         ;;
     '--binlog'|'--log-bin')
-        readonly WSREP_SST_OPT_BINLOG="$2"
+        readonly WSREP_SST_OPT_BINLOG=$(trim_string "$2")
         shift
         ;;
     '--binlog-index'|'--log-bin-index')
-        WSREP_SST_OPT_BINLOG_INDEX="$2"
+        WSREP_SST_OPT_BINLOG_INDEX=$(trim_string "$2")
         shift
         ;;
     '--log-basename')
-        readonly WSREP_SST_OPT_LOG_BASENAME="$2"
+        readonly WSREP_SST_OPT_LOG_BASENAME=$(trim_string "$2")
         shift
         ;;
     '--gtid-domain-id')
-        readonly WSREP_SST_OPT_GTID_DOMAIN_ID="$2"
+        readonly WSREP_SST_OPT_GTID_DOMAIN_ID=$(trim_string "$2")
         shift
         ;;
     '--mysqld-args')
@@ -447,6 +505,12 @@ case "$1" in
                # from mysqld's argument list:
                skip_mysqld_arg=0
                case "$option" in
+                   '--aria-log-dir-path')
+                       if [ -z "$ARIA_LOG_DIR" ]; then
+                           MYSQLD_OPT_ARIA_LOG_DIR=$(trim_dir "$value")
+                       fi
+                       skip_mysqld_arg=1
+                       ;;
                    '--innodb-data-home-dir')
                        if [ -z "$INNODB_DATA_HOME_DIR" ]; then
                            MYSQLD_OPT_INNODB_DATA_HOME_DIR=$(trim_dir "$value")
@@ -462,6 +526,12 @@ case "$1" in
                    '--innodb-undo-directory')
                        if [ -z "$INNODB_UNDO_DIR" ]; then
                            MYSQLD_OPT_INNODB_UNDO_DIR=$(trim_dir "$value")
+                       fi
+                       skip_mysqld_arg=1
+                       ;;
+                   '--innodb-buffer-pool-filename')
+                       if [ -z "$INNODB_BUFFER_POOL" ]; then
+                           MYSQLD_OPT_INNODB_BUFFER_POOL=$(trim_string "$value")
                        fi
                        skip_mysqld_arg=1
                        ;;
@@ -511,10 +581,33 @@ case "$1" in
 esac
 shift
 done
-readonly WSREP_SST_OPT_BYPASS
+
+WSREP_TRANSFER_TYPE='SST'
+[ $WSREP_SST_OPT_BYPASS -ne 0 ] && readonly WSREP_TRANSFER_TYPE='IST'
+# Let's take the name of the current script as a base,
+# removing the directory, extension and "wsrep_sst_" prefix:
+WSREP_METHOD="${0##*/}"
+WSREP_METHOD="${WSREP_METHOD%.*}"
+readonly WSREP_METHOD="${WSREP_METHOD#wsrep_sst_}"
+if [ -n "${WSREP_SST_OPT_ROLE+x}" ]; then
+    if [ "$WSREP_SST_OPT_ROLE" != 'donor' -a \
+         "$WSREP_SST_OPT_ROLE" != 'joiner' ]
+    then
+        wsrep_log_error "Unrecognized role: '$WSREP_SST_OPT_ROLE'"
+        exit 22 # EINVAL
+    fi
+else
+    readonly WSREP_SST_OPT_ROLE='donor'
+fi
+
+readonly WSREP_SST_OPT_PROGRESS
 
 # The same argument can be present on the command line several
 # times, in this case we must take its last value:
+if [ -n "${MYSQLD_OPT_ARIA_LOG_DIR:-}" -a \
+     -z "$ARIA_LOG_DIR" ]; then
+    readonly ARIA_LOG_DIR="$MYSQLD_OPT_ARIA_LOG_DIR"
+fi
 if [ -n "${MYSQLD_OPT_INNODB_DATA_HOME_DIR:-}" -a \
      -z "$INNODB_DATA_HOME_DIR" ]; then
     readonly INNODB_DATA_HOME_DIR="$MYSQLD_OPT_INNODB_DATA_HOME_DIR"
@@ -526,6 +619,10 @@ fi
 if [ -n "${MYSQLD_OPT_INNODB_UNDO_DIR:-}" -a \
      -z "$INNODB_UNDO_DIR" ]; then
     readonly INNODB_UNDO_DIR="$MYSQLD_OPT_INNODB_UNDO_DIR"
+fi
+if [ -n "${MYSQLD_OPT_INNODB_BUFFER_POOL:-}" -a \
+     -z "$INNODB_BUFFER_POOL" ]; then
+    readonly INNODB_BUFFER_POOL="$MYSQLD_OPT_INNODB_BUFFER_POOL"
 fi
 if [ -n "${MYSQLD_OPT_LOG_BIN:-}" -a \
      -z "$WSREP_SST_OPT_BINLOG" ]; then
@@ -568,6 +665,9 @@ if [ -n "$WSREP_SST_OPT_LOG_BASENAME" ]; then
         WSREP_SST_OPT_MYSQLD="--log-basename='$WSREP_SST_OPT_LOG_BASENAME'"
     fi
 fi
+if [ -n "$ARIA_LOG_DIR" ]; then
+    INNOEXTRA="$INNOEXTRA --aria-log-dir-path='$ARIA_LOG_DIR'"
+fi
 if [ -n "$INNODB_DATA_HOME_DIR" ]; then
     INNOEXTRA="$INNOEXTRA --innodb-data-home-dir='$INNODB_DATA_HOME_DIR'"
 fi
@@ -576,6 +676,9 @@ if [ -n "$INNODB_LOG_GROUP_HOME" ]; then
 fi
 if [ -n "$INNODB_UNDO_DIR" ]; then
     INNOEXTRA="$INNOEXTRA --innodb-undo-directory='$INNODB_UNDO_DIR'"
+fi
+if [ -n "$INNODB_BUFFER_POOL" ]; then
+    INNOEXTRA="$INNOEXTRA --innodb-buffer-pool-filename='$INNODB_BUFFER_POOL'"
 fi
 if [ -n "$WSREP_SST_OPT_BINLOG" ]; then
     INNOEXTRA="$INNOEXTRA --log-bin='$WSREP_SST_OPT_BINLOG'"
@@ -719,7 +822,7 @@ wsrep_log()
 {
     # echo everything to stderr so that it gets into common error log
     # deliberately made to look different from the rest of the log
-    local readonly tst="$(date +%Y%m%d\ %H:%M:%S.%N | cut -b -21)"
+    local readonly tst=$(date "+%Y%m%d %H:%M:%S.%N" | cut -b -21)
     echo "WSREP_SST: $* ($tst)" >&2
 }
 
@@ -1050,7 +1153,7 @@ is_local_ip()
     [ "$1" = '127.0.0.1' -o \
       "$1" = '127.0.0.2' -o \
       "$1" = 'localhost' -o \
-      "$1" = '[::1]' ] && return 0
+      "$1" = '::1' ] && return 0
     # If the address starts with "127." this is probably a local
     # address, but we need to clarify what follows this prefix:
     if [ "${1#127.}" != "$1" ]; then
@@ -1067,21 +1170,25 @@ is_local_ip()
          "$1" = "$(hostname -f)" -o \
          "$1" = "$(hostname -d)" ] && return 0
     fi
+    # If the address contains anything other than digits
+    # and separators, it is not a local address:
+    [ "${1#*[!0-9.]}" != "$1" ] && \
+    [ "${1#*[!0-9A-Fa-f:\[\]]}" != "$1" ] && return 1
     # Now let's check if the given address is assigned to
     # one of the network cards:
     local ip_util=$(commandex 'ip')
     if [ -n "$ip_util" ]; then
         # ip address show ouput format is " inet[6] <address>/<mask>":
         "$ip_util" address show \
-             | grep -E '^[[:space:]]*inet.? [^[:space:]]+/' -o \
-             | grep -F " $1/" >/dev/null && return 0
+            | grep -o -E '^[[:space:]]*inet.?[[:space:]]+[^[:space:]]+/' \
+            | grep -qw -F -- "$1/" && return 0
     else
         local ifconfig_util=$(commandex 'ifconfig')
         if [ -n "$ifconfig_util" ]; then
             # ifconfig output format is " inet[6] <address> ...":
             "$ifconfig_util" \
-                 | grep -E '^[[:space:]]*inet.? [^[:space:]]+ ' -o \
-                 | grep -F " $1 " >/dev/null && return 0
+                | grep -o -E '^[[:space:]]*inet.?[[:space:]]+[^[:space:]]+' \
+                | grep -qw -F -- "$1" && return 0
         fi
     fi
     return 1
@@ -1158,28 +1265,27 @@ check_port()
 check_for_dhparams()
 {
     ssl_dhparams="$DATA/dhparams.pem"
-    if [ ! -r "$ssl_dhparams" ]; then
-        get_openssl
-        if [ -n "$OPENSSL_BINARY" ]; then
-            wsrep_log_info \
-                "Could not find dhparams file, creating $ssl_dhparams"
-            local bug=0
-            local errmsg
-            errmsg=$("$OPENSSL_BINARY" \
-                         dhparam -out "$ssl_dhparams" 2048 2>&1) || bug=1
-            if [ $bug -ne 0 ]; then
-                wsrep_log_info "run: \"$OPENSSL_BINARY\" dhparam -out \"$ssl_dhparams\" 2048"
-                wsrep_log_info "output: $errmsg"
-                wsrep_log_error "******** ERROR *****************************************"
-                wsrep_log_error "* Could not create the dhparams.pem file with OpenSSL. *"
-                wsrep_log_error "********************************************************"
-                ssl_dhparams=""
-            fi
-        else
-            # Rollback: if openssl is not installed, then use
-            # the default parameters:
+    get_openssl
+    if [ -n "$OPENSSL_BINARY" ]; then
+        wsrep_log_info \
+            "Could not find dhparams file, creating $ssl_dhparams"
+        local bug=0
+        local errmsg
+        errmsg=$("$OPENSSL_BINARY" \
+                 dhparam -out "$ssl_dhparams" -dsaparam 2048 2>&1) || bug=1
+        if [ $bug -ne 0 ]; then
+            wsrep_log_info "run: \"$OPENSSL_BINARY\" dhparam"\
+                           "-out \"$ssl_dhparams\" -dsaparam 2048"
+            wsrep_log_info "output: $errmsg"
+            wsrep_log_error "******** ERROR *****************************************"
+            wsrep_log_error "* Could not create the dhparams.pem file with OpenSSL. *"
+            wsrep_log_error "********************************************************"
             ssl_dhparams=""
         fi
+    else
+        # Rollback: if openssl is not installed, then use
+        # the default parameters:
+        ssl_dhparams=""
     fi
 }
 
@@ -1281,29 +1387,39 @@ verify_cert_matches_key()
 #
 check_for_version()
 {
-    y1="${1#*.}"
+    local y1="${1#*.}"
     [ "$y1" = "$1" ] && y1=""
-    z1=${y1#*.}
+    local z1="${y1#*.}"
     [ "$z1" = "$y1" ] && z1=""
-    x1="${1%%.*}"
+    local w1="${z1#*.}"
+    [ "$w1" = "$z1" ] && w1=""
+    local x1="${1%%.*}"
     y1="${y1%%.*}"
     z1="${z1%%.*}"
+    w1="${w1%%.*}"
     [ -z "$y1" ] && y1=0
     [ -z "$z1" ] && z1=0
-    y2="${2#*.}"
+    [ -z "$w1" ] && w1=0
+    local y2="${2#*.}"
     [ "$y2" = "$2" ] && y2=""
-    z2="${y2#*.}"
+    local z2="${y2#*.}"
     [ "$z2" = "$y2" ] && z2=""
-    x2="${2%%.*}"
+    local w2="${z2#*.}"
+    [ "$w2" = "$z2" ] && w2=""
+    local x2="${2%%.*}"
     y2="${y2%%.*}"
     z2="${z2%%.*}"
+    w2="${w2%%.*}"
     [ -z "$y2" ] && y2=0
     [ -z "$z2" ] && z2=0
+    [ -z "$w2" ] && w2=0
     [ $x1 -lt $x2 ] && return 1
     [ $x1 -gt $x2 ] && return 0
     [ $y1 -lt $y2 ] && return 1
     [ $y1 -gt $y2 ] && return 0
     [ $z1 -lt $z2 ] && return 1
+    [ $z1 -gt $z2 ] && return 0
+    [ $w1 -lt $w2 ] && return 1
     return 0
 }
 
@@ -1403,7 +1519,7 @@ get_proc()
     if [ -z "$nproc" ]; then
         set +e
         if [ "$OS" = 'Linux' ]; then
-            nproc=$(grep -c processor /proc/cpuinfo 2>/dev/null)
+            nproc=$(grep -cw -E '^processor' /proc/cpuinfo 2>/dev/null)
         elif [ "$OS" = 'Darwin' -o "$OS" = 'FreeBSD' ]; then
             nproc=$(sysctl -n hw.ncpu)
         fi
@@ -1452,3 +1568,19 @@ check_server_ssl_config()
         fi
     fi
 }
+
+simple_cleanup()
+{
+    # Since this is invoked just after exit NNN
+    local estatus=$?
+    if [ $estatus -ne 0 ]; then
+        wsrep_log_error "Cleanup after exit with status: $estatus"
+    fi
+    if [ -n "${SST_PID:-}" ]; then
+        [ "$(pwd)" != "$OLD_PWD" ] && cd "$OLD_PWD"
+        [ -f "$SST_PID" ] && rm -f "$SST_PID" || :
+    fi
+    exit $estatus
+}
+
+wsrep_log_info "$WSREP_METHOD $WSREP_TRANSFER_TYPE started on $WSREP_SST_OPT_ROLE"

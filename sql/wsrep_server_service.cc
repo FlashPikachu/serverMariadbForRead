@@ -148,9 +148,13 @@ void Wsrep_server_service::release_high_priority_service(wsrep::high_priority_se
   wsrep_delete_threadvars();
 }
 
-void Wsrep_server_service::background_rollback(wsrep::client_state& client_state)
+void Wsrep_server_service::background_rollback(
+    wsrep::unique_lock<wsrep::mutex> &lock WSREP_UNUSED,
+    wsrep::client_state &client_state)
 {
-  Wsrep_client_state& cs= static_cast<Wsrep_client_state&>(client_state);
+  DBUG_ASSERT(lock.owns_lock());
+  Wsrep_client_state &cs= static_cast<Wsrep_client_state &>(client_state);
+  mysql_mutex_assert_owner(&cs.thd()->LOCK_thd_data);
   wsrep_fire_rollbacker(cs.thd());
 }
 
@@ -391,6 +395,7 @@ int Wsrep_server_service::wait_committing_transactions(int timeout)
 
 void Wsrep_server_service::debug_sync(const char* sync_point)
 {
+#ifdef ENABLED_DEBUG_SYNC
   DBUG_EXECUTE_IF(sync_point, {
       std::stringstream dbug_action;
       dbug_action << "now "
@@ -401,4 +406,5 @@ void Wsrep_server_service::debug_sync(const char* sync_point)
                                          action.c_str(),
                                          action.length()));
     };);
+#endif
 }

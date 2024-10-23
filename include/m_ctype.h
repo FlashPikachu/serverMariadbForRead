@@ -15,7 +15,7 @@
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 /*
-  A better inplementation of the UNIX ctype(3) library.
+  A better implementation of the UNIX ctype(3) library.
 */
 
 #ifndef _m_ctype_h
@@ -139,7 +139,7 @@ const uint16 *my_uca_contraction2_weight(const MY_CONTRACTIONS *c,
                                          my_wc_t wc1, my_wc_t wc2);
 
 
-/* Collation weights on a single level (e.g. primary, secondary, tertiarty) */
+/* Collation weights on a single level (e.g. primary, secondary, tertiary) */
 typedef struct my_uca_level_info_st
 {
   my_wc_t maxchar;
@@ -268,6 +268,28 @@ typedef enum enum_repertoire_t
 #define MY_STRXFRM_REVERSE_LEVEL5  0x00100000 /* if reverse order for level5 */
 #define MY_STRXFRM_REVERSE_LEVEL6  0x00200000 /* if reverse order for level6 */
 #define MY_STRXFRM_REVERSE_SHIFT   16
+
+/* Flags to strnncollsp_nchars */
+/*
+  MY_STRNNCOLLSP_NCHARS_EMULATE_TRIMMED_TRAILING_SPACES -
+    defines if inside strnncollsp_nchars()
+    short strings should be virtually extended to "nchars"
+    characters by emulating trimmed trailing spaces.
+
+    This flag is needed when comparing packed strings of the CHAR
+    data type, when trailing spaces are trimmed on storage (like in InnoDB),
+    however the actual values (after unpacking) will have those trailing
+    spaces.
+
+    If this flag is passed, strnncollsp_nchars() performs both
+    truncating longer strings and extending shorter strings
+    to exactly "nchars".
+
+    If this flag is not passed, strnncollsp_nchars() only truncates longer
+    strings to "nchars", but does not extend shorter strings to "nchars".
+*/
+#define MY_STRNNCOLLSP_NCHARS_EMULATE_TRIMMED_TRAILING_SPACES 1
+
 
 /*
    Collation IDs for MariaDB that should not conflict with MySQL.
@@ -404,7 +426,8 @@ struct my_collation_handler_st
   int     (*strnncollsp_nchars)(CHARSET_INFO *,
                                 const uchar *str1, size_t len1,
                                 const uchar *str2, size_t len2,
-                                size_t nchars);
+                                size_t nchars,
+                                uint flags);
   size_t     (*strnxfrm)(CHARSET_INFO *,
                          uchar *dst, size_t dstlen, uint nweights,
                          const uchar *src, size_t srclen, uint flags);
@@ -1561,7 +1584,7 @@ uint32 my_convert(char *to, uint32 to_length, CHARSET_INFO *to_cs,
   An extended version of my_convert(), to pass non-default mb_wc() and wc_mb().
   For example, String::copy_printable() which is used in
   Protocol::store_warning() uses this to escape control
-  and non-convertable characters.
+  and non-convertible characters.
 */
 uint32 my_convert_using_func(char *to, size_t to_length, CHARSET_INFO *to_cs,
                              my_charset_conv_wc_mb mb_wc,
@@ -1642,7 +1665,7 @@ size_t my_convert_fix(CHARSET_INFO *dstcs, char *dst, size_t dst_length,
   @param str - the beginning of the string
   @param end - the string end (the next byte after the string)
   @return    >0, for a multi-byte character
-  @rerurn    0,  for a single byte character, broken sequence, empty string.
+  @return    0,  for a single byte character, broken sequence, empty string.
 */
 static inline
 uint my_ismbchar(CHARSET_INFO *cs, const char *str, const char *end)

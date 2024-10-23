@@ -313,7 +313,7 @@ PDBUSER PlgMakeUser(PGLOBAL g)
   PDBUSER dbuserp;
 
   if (!(dbuserp = (PDBUSER)malloc(sizeof(DBUSERBLK)))) {
-    sprintf(g->Message, MSG(MALLOC_ERROR), "PlgMakeUser");
+    snprintf(g->Message, sizeof(g->Message), MSG(MALLOC_ERROR), "PlgMakeUser");
     return NULL;
     } // endif dbuserp
 
@@ -381,7 +381,7 @@ char *SetPath(PGLOBAL g, const char *path)
 			return NULL;
 
 		if (PlugIsAbsolutePath(path)) {
-			strcpy(buf, path);
+			snprintf(buf, len, "%s", path);
 			return buf;
 		} // endif path
 
@@ -391,9 +391,9 @@ char *SetPath(PGLOBAL g, const char *path)
 #else   // !_WIN32
 			const char *s = "/";
 #endif  // !_WIN32
-			strcat(strcat(strcat(strcpy(buf, "."), s), path), s);
+			snprintf(buf, len, ".%s%s%s", s, path, s);
 		} else
-			strcpy(buf, path);
+			snprintf(buf, len, "%s", path);
 
 	} // endif path
 
@@ -416,7 +416,7 @@ char *ExtractFromPath(PGLOBAL g, char *pBuff, char *FileName, OPVAL op)
     case OP_FNAME: fname = pBuff; break;
     case OP_FTYPE: ftype = pBuff; break;
     default:
-      sprintf(g->Message, MSG(INVALID_OPER), op, "ExtractFromPath");
+      snprintf(g->Message, sizeof(g->Message), MSG(INVALID_OPER), op, "ExtractFromPath");
       return NULL;
     } // endswitch op
 
@@ -1399,7 +1399,7 @@ void *PlgDBSubAlloc(PGLOBAL g, void *memp, size_t size)
          memp, size, pph->To_Free, pph->FreeBlk);
 
   if (size > pph->FreeBlk) {   /* Not enough memory left in pool */
-    sprintf(g->Message,
+    snprintf(g->Message, sizeof(g->Message),
     "Not enough memory in Work area for request of %zd (used=%zd free=%zd)",
             size, pph->To_Free, pph->FreeBlk);
 
@@ -1530,7 +1530,7 @@ DllExport void NewPointer(PTABS t, void *oldv, void *newv)
     if (!(tp = new TABPTR)) {
       PGLOBAL g = t->G;
 
-      sprintf(g->Message, "NewPointer: %s", MSG(MEM_ALLOC_ERROR));
+      snprintf(g->Message, sizeof(g->Message), "NewPointer: %s", MSG(MEM_ALLOC_ERROR));
 			throw 3;
 		} else {
       tp->Next = t->P1;
@@ -1565,7 +1565,7 @@ int FileComp(PGLOBAL g, char *file1, char *file2)
 
     if (h[i] == -1) {
 //      if (errno != ENOENT) {
-        sprintf(g->Message, MSG(OPEN_MODE_ERROR),
+        snprintf(g->Message, sizeof(g->Message), MSG(OPEN_MODE_ERROR),
                 "rb", (int)errno, fn[i]);
         strcat(strcat(g->Message, ": "), strerror(errno));
 				throw 666;
@@ -1574,7 +1574,7 @@ int FileComp(PGLOBAL g, char *file1, char *file2)
 
     } else {
       if ((len[i] = _filelength(h[i])) < 0) {
-        sprintf(g->Message, MSG(FILELEN_ERROR), "_filelength", fn[i]);
+        snprintf(g->Message, sizeof(g->Message), MSG(FILELEN_ERROR), "_filelength", fn[i]);
 				throw 666;
 			} // endif len
 
@@ -1588,7 +1588,7 @@ int FileComp(PGLOBAL g, char *file1, char *file2)
   while (rc == -1) {
     for (i = 0; i < 2; i++)
       if ((n[i] = read(h[i], bp[i], 4096)) < 0) {
-        sprintf(g->Message, MSG(READ_ERROR), fn[i], strerror(errno));
+        snprintf(g->Message, sizeof(g->Message), MSG(READ_ERROR), fn[i], strerror(errno));
         goto fin;
         } // endif n
 

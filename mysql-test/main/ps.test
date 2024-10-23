@@ -464,6 +464,7 @@ deallocate prepare stmt;
 # Bug#6088 "FOUND_ROWS returns wrong values for prepared statements when
 # LIMIT is used"
 # 
+--disable_ps2_protocol
 create table t1 (a int);
 insert into t1 (a) values (1), (2), (3), (4), (5), (6), (7), (8), (9), (10);
 prepare stmt from "select sql_calc_found_rows * from t1 limit 2";
@@ -475,6 +476,7 @@ execute stmt;
 select found_rows();
 deallocate prepare stmt;
 drop table t1;
+--enable_ps2_protocol
 
 #
 # Bug#6047 "permission problem when executing mysql_stmt_execute with derived
@@ -556,13 +558,14 @@ drop table t1;
 #
 # Bug #6089: FOUND_ROWS returns wrong values when no table/view is used 
 #
-
+--disable_ps2_protocol
 prepare stmt from "SELECT SQL_CALC_FOUND_ROWS 'foo' UNION SELECT 'bar' LIMIT 0";
 execute stmt;
 SELECT FOUND_ROWS();
 execute stmt;                                                                   
 SELECT FOUND_ROWS();                                                            
 deallocate prepare stmt;
+--enable_ps2_protocol
 
 #
 # Bug#9096 "select doesn't return all matched records if prepared statements
@@ -1410,11 +1413,13 @@ DEALLOCATE PREPARE b12651;
 # Bug #14956: ROW_COUNT() returns incorrect result after EXECUTE of prepared
 # statement
 #
+--disable_ps2_protocol
 create table t1 (id int);
 prepare ins_call from "insert into t1 (id) values (1)";
 execute ins_call;
 select row_count();
 drop table t1;
+--enable_ps2_protocol
 
 #
 # BUG#16474: SP crashed MySQL
@@ -3564,8 +3569,10 @@ flush status;
 execute st;
 show status like '%Handler_read%';
 flush status;
+--disable_ps2_protocol
 select * from t1 use index() where a=3;
 show status like '%Handler_read%';
+--enable_ps2_protocol
 flush status;
 execute st;
 show status like '%Handler_read%';
@@ -5038,6 +5045,116 @@ EXECUTE stmt;
 DEALLOCATE PREPARE stmt;
 
 DROP PROCEDURE p1;
+
+--echo #
+--echo # MDEV-16128: Server crash in Item_func::print_op on 2nd execution of PS
+--echo #
+
+CREATE TABLE t1 (a varchar(10));
+CREATE TABLE t2 (b varchar(10) CHARACTER SET utf8 );
+CREATE TABLE t3 (c varchar(10) CHARACTER SET utf8);
+INSERT INTO t1 VALUES ('b');
+INSERT INTO t2 VALUES ('b');
+INSERT INTO t3 VALUES ('b');
+
+PREPARE stmt FROM "SELECT t1.* FROM (t1 JOIN t2 ON (t2.b = t1.a)) WHERE (EXISTS (SELECT 1 FROM t3 WHERE t3.c = t1.a))";
+EXECUTE stmt;
+--echo # Without the patch second execution of the prepared statement
+--echo # would lead to server crash.
+EXECUTE stmt;
+--echo # Clean up
+DEALLOCATE PREPARE stmt;
+DROP TABLE t1, t2, t3;
+
+CREATE TABLE t1 (a varchar(10));
+CREATE TABLE t2 (b varchar(10) CHARACTER SET utf8);
+INSERT INTO t1 VALUES ('b');
+INSERT INTO t2 VALUES ('b');
+PREPARE stmt FROM 'SELECT STRAIGHT_JOIN 1 FROM t1 WHERE EXISTS (SELECT 1 FROM t2 WHERE t2.b = t1.a)';
+EXECUTE stmt;
+--echo # Without the patch second execution of the prepared statement
+--echo # would lead to server crash.
+EXECUTE stmt;
+
+--echo # Clean up
+DEALLOCATE PREPARE stmt;
+
+--echo # Check that EXECUTE USING is run correctly
+PREPARE stmt FROM 'SELECT 300 FROM t1 WHERE EXISTS (SELECT 100 FROM t2 WHERE t2.b = ?)';
+EXECUTE stmt USING 'b';
+EXECUTE stmt USING 'b';
+
+EXECUTE stmt USING 'd';
+EXECUTE stmt USING 'd';
+
+EXECUTE stmt USING _binary 'b';
+EXECUTE stmt USING _binary 'b';
+
+EXECUTE stmt USING _binary 'B';
+EXECUTE stmt USING 'B';
+
+EXECUTE stmt USING _binary 'd';
+EXECUTE stmt USING _binary 'd';
+
+EXECUTE stmt USING _ucs2 'b';
+EXECUTE stmt USING _ucs2 'b';
+
+EXECUTE stmt USING _ucs2 'd';
+EXECUTE stmt USING _ucs2 'd';
+
+EXECUTE stmt USING _latin1 'b';
+EXECUTE stmt USING _latin1 'b';
+
+EXECUTE stmt USING _latin1 'd';
+EXECUTE stmt USING _latin1 'd';
+
+CREATE TABLE t3 (c VARCHAR(10) CHARACTER SET ucs2);
+INSERT INTO t3 VALUES ('b');
+PREPARE stmt FROM 'SELECT 300 FROM t1 WHERE EXISTS (SELECT 100 FROM t3 WHERE t3.c = ?)';
+EXECUTE stmt USING 'b';
+EXECUTE stmt USING 'b';
+EXECUTE stmt USING 'd';
+EXECUTE stmt USING 'd';
+DROP TABLE t1, t2, t3;
+
+set @@max_session_mem_used=default;
+create table t (a varchar(10)) character set utf8;
+insert into t values ('');
+prepare stmt from "select 1 from t where a = ?";
+set @@max_session_mem_used=(select memory_used*2 from information_schema.processlist where id=connection_id());
+let $run= 1000;
+disable_result_log;
+disable_query_log;
+while ($run) {
+  execute stmt using repeat('x',10000);
+  dec $run;
+}
+enable_result_log;
+enable_query_log;
+deallocate prepare stmt;
+drop table t;
+set @@max_session_mem_used=default;
+
+create table t (a varchar(10)) character set utf8;
+insert into t values ('');
+prepare stmt from "select 1 from t where a = 'a'";
+set @@max_session_mem_used=(select memory_used*2 from information_schema.processlist where id=connection_id());
+let $run= 1000;
+disable_result_log;
+disable_query_log;
+while ($run) {
+  execute stmt;
+  dec $run;
+}
+enable_result_log;
+enable_query_log;
+deallocate prepare stmt;
+drop table t;
+set @@max_session_mem_used=default;
+
+--echo #
+--echo # End of 10.3 tests
+--echo #
 
 --echo #
 --echo # MDEV-19263: Server crashes in mysql_handle_single_derived

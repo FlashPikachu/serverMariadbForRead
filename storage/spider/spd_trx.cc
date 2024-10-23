@@ -88,43 +88,55 @@ uchar *spider_trx_ha_get_key(
   DBUG_RETURN((uchar*) trx_ha->table_name);
 }
 
-int spider_free_trx_conn(
-  SPIDER_TRX *trx,
-  bool trx_free
-) {
-  int roop_count;
+/*
+  Try to free the connections held by the given transaction.
+*/
+int spider_free_trx_conn(SPIDER_TRX *trx, bool trx_free)
+{
+  int loop_count= 0;
   SPIDER_CONN *conn;
+  HASH *conn_hash= &trx->trx_conn_hash;
+
   DBUG_ENTER("spider_free_trx_conn");
-  roop_count = 0;
-  if (
-    trx_free ||
-    spider_param_conn_recycle_mode(trx->thd) != 2
-  ) {
-    while ((conn = (SPIDER_CONN*) my_hash_element(&trx->trx_conn_hash,
-      roop_count)))
+
+  /* Clear the connection queues in any case. */
+  while ((conn= (SPIDER_CONN *) my_hash_element(conn_hash, loop_count)))
+  {
+    spider_conn_clear_queue_at_commit(conn);
+    loop_count++;
+  }
+
+  if (trx_free || spider_param_conn_recycle_mode(trx->thd) != 2)
+  {
+    loop_count= 0;
+    while ((conn= (SPIDER_CONN *) my_hash_element(&trx->trx_conn_hash,
+                                                  loop_count)))
     {
-      spider_conn_clear_queue_at_commit(conn);
       if (conn->table_lock)
       {
         DBUG_ASSERT(!trx_free);
-        roop_count++;
-      } else
-        spider_free_conn_from_trx(trx, conn, FALSE, trx_free, &roop_count);
+        loop_count++;
+      }
+      else
+      {
+        spider_free_conn_from_trx(trx, conn, FALSE, trx_free, &loop_count);
+      }
     }
     trx->trx_conn_adjustment++;
-  } else {
-    while ((conn = (SPIDER_CONN*) my_hash_element(&trx->trx_conn_hash,
-      roop_count)))
-    {
-      spider_conn_clear_queue_at_commit(conn);
-      if (conn->table_lock)
-      {
-        DBUG_ASSERT(!trx_free);
-      } else
-        conn->error_mode = 1;
-      roop_count++;
-    }
+
+    DBUG_RETURN(0);
   }
+
+  loop_count= 0;
+  while ((conn= (SPIDER_CONN *) my_hash_element(conn_hash, loop_count)))
+  {
+    if (!conn->table_lock)
+    {
+      conn->error_mode= 1;
+    }
+    loop_count++;
+  }
+
   DBUG_RETURN(0);
 }
 
@@ -387,12 +399,28 @@ int spider_free_trx_alter_table(
   DBUG_RETURN(0);
 }
 
+/** Copy a string from one array to another */
+static inline void spider_maybe_memcpy_indexed_string(
+  char **dests,
+  char **srcs,
+  const uint* lengths,
+  const int idx,
+  char *&ptr)
+{
+  if (size_t len= sizeof(char) * lengths[idx])
+  {
+    dests[idx]= ptr;
+    memcpy(ptr, srcs[idx], len);
+    ptr+= len + 1;
+  }
+}
+
 int spider_create_trx_alter_table(
   SPIDER_TRX *trx,
   SPIDER_SHARE *share,
   bool now_create
 ) {
-  int error_num, roop_count;
+  int error_num, link_idx;
   SPIDER_ALTER_TABLE *alter_table, *share_alter;
   char *tmp_name;
   char **tmp_server_names;
@@ -621,131 +649,82 @@ int spider_create_trx_alter_table(
   alter_table->tmp_tgt_drivers_lengths = tmp_tgt_drivers_lengths;
   alter_table->tmp_static_link_ids_lengths = tmp_static_link_ids_lengths;
 
-  for(roop_count = 0; roop_count < (int) share->all_link_count; roop_count++)
+  for(link_idx = 0; link_idx < (int) share->all_link_count; link_idx++)
   {
-    tmp_server_names[roop_count] = tmp_server_names_char;
-    memcpy(tmp_server_names_char,
-      share_alter->tmp_server_names[roop_count],
-      sizeof(char) * share_alter->tmp_server_names_lengths[roop_count]);
-    tmp_server_names_char +=
-      share_alter->tmp_server_names_lengths[roop_count] + 1;
+    spider_maybe_memcpy_indexed_string(
+      tmp_server_names, share_alter->tmp_server_names,
+      share_alter->tmp_server_names_lengths, link_idx, tmp_server_names_char);
 
-    tmp_tgt_table_names[roop_count] = tmp_tgt_table_names_char;
-    memcpy(tmp_tgt_table_names_char,
-      share_alter->tmp_tgt_table_names[roop_count],
-      sizeof(char) * share_alter->tmp_tgt_table_names_lengths[roop_count]);
-    tmp_tgt_table_names_char +=
-      share_alter->tmp_tgt_table_names_lengths[roop_count] + 1;
+    spider_maybe_memcpy_indexed_string(
+      tmp_tgt_table_names, share_alter->tmp_tgt_table_names,
+      share_alter->tmp_tgt_table_names_lengths, link_idx, tmp_tgt_table_names_char);
 
-    tmp_tgt_dbs[roop_count] = tmp_tgt_dbs_char;
-    memcpy(tmp_tgt_dbs_char, share_alter->tmp_tgt_dbs[roop_count],
-      sizeof(char) * share_alter->tmp_tgt_dbs_lengths[roop_count]);
-    tmp_tgt_dbs_char +=
-      share_alter->tmp_tgt_dbs_lengths[roop_count] + 1;
+    spider_maybe_memcpy_indexed_string(
+      tmp_tgt_dbs, share_alter->tmp_tgt_dbs,
+      share_alter->tmp_tgt_dbs_lengths, link_idx, tmp_tgt_dbs_char);
 
-    tmp_tgt_hosts[roop_count] = tmp_tgt_hosts_char;
-    memcpy(tmp_tgt_hosts_char, share_alter->tmp_tgt_hosts[roop_count],
-      sizeof(char) * share_alter->tmp_tgt_hosts_lengths[roop_count]);
-    tmp_tgt_hosts_char +=
-      share_alter->tmp_tgt_hosts_lengths[roop_count] + 1;
+    spider_maybe_memcpy_indexed_string(
+      tmp_tgt_hosts, share_alter->tmp_tgt_hosts,
+      share_alter->tmp_tgt_hosts_lengths, link_idx, tmp_tgt_hosts_char);
 
-    tmp_tgt_usernames[roop_count] = tmp_tgt_usernames_char;
-    memcpy(tmp_tgt_usernames_char, share_alter->tmp_tgt_usernames[roop_count],
-      sizeof(char) * share_alter->tmp_tgt_usernames_lengths[roop_count]);
-    tmp_tgt_usernames_char +=
-      share_alter->tmp_tgt_usernames_lengths[roop_count] + 1;
+    spider_maybe_memcpy_indexed_string(
+      tmp_tgt_usernames, share_alter->tmp_tgt_usernames,
+      share_alter->tmp_tgt_usernames_lengths, link_idx, tmp_tgt_usernames_char);
 
-    tmp_tgt_passwords[roop_count] = tmp_tgt_passwords_char;
-    memcpy(tmp_tgt_passwords_char, share_alter->tmp_tgt_passwords[roop_count],
-      sizeof(char) * share_alter->tmp_tgt_passwords_lengths[roop_count]);
-    tmp_tgt_passwords_char +=
-      share_alter->tmp_tgt_passwords_lengths[roop_count] + 1;
+    spider_maybe_memcpy_indexed_string(
+      tmp_tgt_passwords, share_alter->tmp_tgt_passwords,
+      share_alter->tmp_tgt_passwords_lengths, link_idx, tmp_tgt_passwords_char);
 
-    tmp_tgt_sockets[roop_count] = tmp_tgt_sockets_char;
-    memcpy(tmp_tgt_sockets_char, share_alter->tmp_tgt_sockets[roop_count],
-      sizeof(char) * share_alter->tmp_tgt_sockets_lengths[roop_count]);
-    tmp_tgt_sockets_char +=
-      share_alter->tmp_tgt_sockets_lengths[roop_count] + 1;
+    spider_maybe_memcpy_indexed_string(
+      tmp_tgt_sockets, share_alter->tmp_tgt_sockets,
+      share_alter->tmp_tgt_sockets_lengths, link_idx, tmp_tgt_sockets_char);
 
-    tmp_tgt_wrappers[roop_count] = tmp_tgt_wrappers_char;
-    memcpy(tmp_tgt_wrappers_char, share_alter->tmp_tgt_wrappers[roop_count],
-      sizeof(char) * share_alter->tmp_tgt_wrappers_lengths[roop_count]);
-    tmp_tgt_wrappers_char +=
-      share_alter->tmp_tgt_wrappers_lengths[roop_count] + 1;
+    spider_maybe_memcpy_indexed_string(
+      tmp_tgt_wrappers, share_alter->tmp_tgt_wrappers,
+      share_alter->tmp_tgt_wrappers_lengths, link_idx, tmp_tgt_wrappers_char);
 
-    tmp_tgt_ssl_cas[roop_count] = tmp_tgt_ssl_cas_char;
-    memcpy(tmp_tgt_ssl_cas_char, share_alter->tmp_tgt_ssl_cas[roop_count],
-      sizeof(char) * share_alter->tmp_tgt_ssl_cas_lengths[roop_count]);
-    tmp_tgt_ssl_cas_char +=
-      share_alter->tmp_tgt_ssl_cas_lengths[roop_count] + 1;
+    spider_maybe_memcpy_indexed_string(
+      tmp_tgt_ssl_cas, share_alter->tmp_tgt_ssl_cas,
+      share_alter->tmp_tgt_ssl_cas_lengths, link_idx, tmp_tgt_ssl_cas_char);
 
-    tmp_tgt_ssl_capaths[roop_count] = tmp_tgt_ssl_capaths_char;
-    memcpy(tmp_tgt_ssl_capaths_char,
-      share_alter->tmp_tgt_ssl_capaths[roop_count],
-      sizeof(char) * share_alter->tmp_tgt_ssl_capaths_lengths[roop_count]);
-    tmp_tgt_ssl_capaths_char +=
-      share_alter->tmp_tgt_ssl_capaths_lengths[roop_count] + 1;
+    spider_maybe_memcpy_indexed_string(
+      tmp_tgt_ssl_capaths, share_alter->tmp_tgt_ssl_capaths,
+      share_alter->tmp_tgt_ssl_capaths_lengths, link_idx, tmp_tgt_ssl_capaths_char);
 
-    tmp_tgt_ssl_certs[roop_count] = tmp_tgt_ssl_certs_char;
-    memcpy(tmp_tgt_ssl_certs_char, share_alter->tmp_tgt_ssl_certs[roop_count],
-      sizeof(char) * share_alter->tmp_tgt_ssl_certs_lengths[roop_count]);
-    tmp_tgt_ssl_certs_char +=
-      share_alter->tmp_tgt_ssl_certs_lengths[roop_count] + 1;
+    spider_maybe_memcpy_indexed_string(
+      tmp_tgt_ssl_certs, share_alter->tmp_tgt_ssl_certs,
+      share_alter->tmp_tgt_ssl_certs_lengths, link_idx, tmp_tgt_ssl_certs_char);
 
-    tmp_tgt_ssl_ciphers[roop_count] = tmp_tgt_ssl_ciphers_char;
-    memcpy(tmp_tgt_ssl_ciphers_char,
-      share_alter->tmp_tgt_ssl_ciphers[roop_count],
-      sizeof(char) * share_alter->tmp_tgt_ssl_ciphers_lengths[roop_count]);
-    tmp_tgt_ssl_ciphers_char +=
-      share_alter->tmp_tgt_ssl_ciphers_lengths[roop_count] + 1;
+    spider_maybe_memcpy_indexed_string(
+      tmp_tgt_ssl_ciphers, share_alter->tmp_tgt_ssl_ciphers,
+      share_alter->tmp_tgt_ssl_ciphers_lengths, link_idx, tmp_tgt_ssl_ciphers_char);
 
-    tmp_tgt_ssl_keys[roop_count] = tmp_tgt_ssl_keys_char;
-    memcpy(tmp_tgt_ssl_keys_char, share_alter->tmp_tgt_ssl_keys[roop_count],
-      sizeof(char) * share_alter->tmp_tgt_ssl_keys_lengths[roop_count]);
-    tmp_tgt_ssl_keys_char +=
-      share_alter->tmp_tgt_ssl_keys_lengths[roop_count] + 1;
+    spider_maybe_memcpy_indexed_string(
+      tmp_tgt_ssl_keys, share_alter->tmp_tgt_ssl_keys,
+      share_alter->tmp_tgt_ssl_keys_lengths, link_idx, tmp_tgt_ssl_keys_char);
 
-    tmp_tgt_default_files[roop_count] = tmp_tgt_default_files_char;
-    memcpy(tmp_tgt_default_files_char,
-      share_alter->tmp_tgt_default_files[roop_count],
-      sizeof(char) * share_alter->tmp_tgt_default_files_lengths[roop_count]);
-    tmp_tgt_default_files_char +=
-      share_alter->tmp_tgt_default_files_lengths[roop_count] + 1;
+    spider_maybe_memcpy_indexed_string(
+      tmp_tgt_default_files, share_alter->tmp_tgt_default_files,
+      share_alter->tmp_tgt_default_files_lengths, link_idx, tmp_tgt_default_files_char);
 
-    tmp_tgt_default_groups[roop_count] = tmp_tgt_default_groups_char;
-    memcpy(tmp_tgt_default_groups_char,
-      share_alter->tmp_tgt_default_groups[roop_count],
-      sizeof(char) * share_alter->tmp_tgt_default_groups_lengths[roop_count]);
-    tmp_tgt_default_groups_char +=
-      share_alter->tmp_tgt_default_groups_lengths[roop_count] + 1;
+    spider_maybe_memcpy_indexed_string(
+      tmp_tgt_default_groups, share_alter->tmp_tgt_default_groups,
+      share_alter->tmp_tgt_default_groups_lengths, link_idx, tmp_tgt_default_groups_char);
+    spider_maybe_memcpy_indexed_string(
+      tmp_tgt_dsns, share_alter->tmp_tgt_dsns,
+      share_alter->tmp_tgt_dsns_lengths, link_idx, tmp_tgt_dsns_char);
 
-    tmp_tgt_dsns[roop_count] = tmp_tgt_dsns_char;
-    memcpy(tmp_tgt_dsns_char, share_alter->tmp_tgt_dsns[roop_count],
-      sizeof(char) * share_alter->tmp_tgt_dsns_lengths[roop_count]);
-    tmp_tgt_dsns_char +=
-      share_alter->tmp_tgt_dsns_lengths[roop_count] + 1;
+    spider_maybe_memcpy_indexed_string(
+      tmp_tgt_filedsns, share_alter->tmp_tgt_filedsns,
+      share_alter->tmp_tgt_filedsns_lengths, link_idx, tmp_tgt_filedsns_char);
 
-    tmp_tgt_filedsns[roop_count] = tmp_tgt_filedsns_char;
-    memcpy(tmp_tgt_filedsns_char, share_alter->tmp_tgt_filedsns[roop_count],
-      sizeof(char) * share_alter->tmp_tgt_filedsns_lengths[roop_count]);
-    tmp_tgt_filedsns_char +=
-      share_alter->tmp_tgt_filedsns_lengths[roop_count] + 1;
+    spider_maybe_memcpy_indexed_string(
+      tmp_tgt_drivers, share_alter->tmp_tgt_drivers,
+      share_alter->tmp_tgt_drivers_lengths, link_idx, tmp_tgt_drivers_char);
 
-    tmp_tgt_drivers[roop_count] = tmp_tgt_drivers_char;
-    memcpy(tmp_tgt_drivers_char, share_alter->tmp_tgt_drivers[roop_count],
-      sizeof(char) * share_alter->tmp_tgt_drivers_lengths[roop_count]);
-    tmp_tgt_drivers_char +=
-      share_alter->tmp_tgt_drivers_lengths[roop_count] + 1;
-
-    if (share_alter->tmp_static_link_ids[roop_count])
-    {
-      tmp_static_link_ids[roop_count] = tmp_static_link_ids_char;
-      memcpy(tmp_static_link_ids_char,
-        share_alter->tmp_static_link_ids[roop_count],
-        sizeof(char) * share_alter->tmp_static_link_ids_lengths[roop_count]);
-      tmp_static_link_ids_char +=
-        share_alter->tmp_static_link_ids_lengths[roop_count] + 1;
-    }
+    spider_maybe_memcpy_indexed_string(
+      tmp_static_link_ids, share_alter->tmp_static_link_ids,
+      share_alter->tmp_static_link_ids_lengths, link_idx, tmp_static_link_ids_char);
   }
 
   memcpy(tmp_tgt_ports, share_alter->tmp_tgt_ports,
@@ -1247,11 +1226,6 @@ SPIDER_TRX *spider_get_trx(
       trx->trx_ha_hash.array.size_of_element);
 
     trx->thd = (THD*) thd;
-    if (thd)
-      trx->thd_hash_value = my_calc_hash(&spider_allocated_thds,
-        (uchar*) thd, sizeof(THD *));
-    else
-      trx->thd_hash_value = 0;
     pthread_mutex_lock(&spider_thread_id_mutex);
     trx->spider_thread_id = spider_thread_id;
     ++spider_thread_id;
@@ -3196,6 +3170,12 @@ int spider_commit(
     DBUG_RETURN(0); /* transaction is not started */
 
 
+  /*
+    We do (almost) nothing if the following two conditions are both met:
+
+    * This is just the end of a statement, not an explicit commit.
+    * The autocommit is OFF or we are in an explicit transaction.
+  */
   if (all || (!thd_test_options(thd, OPTION_NOT_AUTOCOMMIT | OPTION_BEGIN)))
   {
     if (trx->trx_start)

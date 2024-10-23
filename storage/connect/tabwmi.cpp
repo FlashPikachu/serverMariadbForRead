@@ -6,6 +6,7 @@
 #error This is a WINDOWS only table type
 #endif   // !_WIN32
 #include "my_global.h"
+#include "m_string.h"
 #include <stdio.h>
 
 #include "global.h"
@@ -49,7 +50,7 @@ PWMIUT InitWMI(PGLOBAL g, PCSZ nsp, PCSZ classname)
     else if (!stricmp(nsp, "root\\cli"))
       classname = "Msft_CliAlias";
     else {
-      strcpy(g->Message, "Missing class name");
+      safe_strcpy(g->Message, sizeof(g->Message), "Missing class name");
       return NULL;
       } // endif classname
 
@@ -62,7 +63,7 @@ PWMIUT InitWMI(PGLOBAL g, PCSZ nsp, PCSZ classname)
   res = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
 
   if (FAILED(res)) {
-    sprintf(g->Message, "Failed to initialize COM library. " 
+    snprintf(g->Message, sizeof(g->Message), "Failed to initialize COM library. "
             "Error code = %x", res);
     return NULL;
     } // endif res
@@ -74,7 +75,7 @@ PWMIUT InitWMI(PGLOBAL g, PCSZ nsp, PCSZ classname)
                        NULL, EOAC_NONE, NULL);
   
   if (res != RPC_E_TOO_LATE && FAILED(res)) {
-    sprintf(g->Message, "Failed to initialize security. " 
+    snprintf(g->Message, sizeof(g->Message), "Failed to initialize security. "
             "Error code = %p", res);
     CoUninitialize();
     return NULL;
@@ -85,7 +86,7 @@ PWMIUT InitWMI(PGLOBAL g, PCSZ nsp, PCSZ classname)
                          CLSCTX_INPROC_SERVER, IID_IWbemLocator, 
                          (void**) &loc);
   if (FAILED(res)) {
-    sprintf(g->Message, "Failed to create Locator. " 
+    snprintf(g->Message, sizeof(g->Message), "Failed to create Locator. "
             "Error code = %x", res);
     CoUninitialize();
     return NULL;
@@ -95,7 +96,7 @@ PWMIUT InitWMI(PGLOBAL g, PCSZ nsp, PCSZ classname)
                     NULL, NULL, NULL, 0, NULL, NULL, &wp->Svc);
 
   if (FAILED(res)) {
-    sprintf(g->Message, "Could not connect. Error code = %x", res); 
+    snprintf(g->Message, sizeof(g->Message), "Could not connect. Error code = %x", res);
     loc->Release();     
     CoUninitialize();
     return NULL;
@@ -119,7 +120,7 @@ PWMIUT InitWMI(PGLOBAL g, PCSZ nsp, PCSZ classname)
   res = wp->Svc->GetObject(bstr_t(p), 0, 0, &wp->Cobj, 0);
 
   if (FAILED(res)) {
-    sprintf(g->Message, "failed GetObject %s in %s\n", classname, nsp);
+    snprintf(g->Message, sizeof(g->Message), "failed GetObject %s in %s\n", classname, nsp);
     wp->Svc->Release();
     wp->Svc = NULL;    // MUST be set to NULL  (why?)
     return NULL;
@@ -164,12 +165,12 @@ PQRYRES WMIColumns(PGLOBAL g, PCSZ nsp, PCSZ cls, bool info)
     res = wp->Cobj->Get(bstr_t("__Property_Count"), 0, &val, NULL, NULL);
 
     if (FAILED(res)) {
-      sprintf(g->Message, "failed Get(__Property_Count) res=%d\n", res);
+      snprintf(g->Message, sizeof(g->Message), "failed Get(__Property_Count) res=%d\n", res);
       goto err;
       }  // endif res
 
     if (!(n = val.lVal)) {
-      sprintf(g->Message, "Class %s in %s has no properties\n",
+      snprintf(g->Message, sizeof(g->Message), "Class %s in %s has no properties\n",
                           cls, nsp);
       goto err;
       }  // endif res
@@ -182,7 +183,7 @@ PQRYRES WMIColumns(PGLOBAL g, PCSZ nsp, PCSZ cls, bool info)
           NULL, &prnlist);
 
     if (FAILED(res)) {
-      sprintf(g->Message, "failed GetNames res=%d\n", res);
+      snprintf(g->Message, sizeof(g->Message), "failed GetNames res=%d\n", res);
       goto err;
       }  // endif res
 
@@ -194,7 +195,7 @@ PQRYRES WMIColumns(PGLOBAL g, PCSZ nsp, PCSZ cls, bool info)
       res = SafeArrayGetElement(prnlist, &i, &propname);
 
       if (FAILED(res)) {
-        sprintf(g->Message, "failed GetArrayElement res=%d\n", res);
+        snprintf(g->Message, sizeof(g->Message), "failed GetArrayElement res=%d\n", res);
         goto err;
         }  // endif res
 
@@ -221,7 +222,7 @@ PQRYRES WMIColumns(PGLOBAL g, PCSZ nsp, PCSZ cls, bool info)
   res = wp->Cobj->BeginEnumeration(WBEM_FLAG_NONSYSTEM_ONLY);
 
   if (FAILED(res)) {
-    sprintf(g->Message, "failed BeginEnumeration hr=%d\n", res);
+    snprintf(g->Message, sizeof(g->Message), "failed BeginEnumeration hr=%d\n", res);
     qrp = NULL;
     goto err;
     }  // endif hr
@@ -230,7 +231,7 @@ PQRYRES WMIColumns(PGLOBAL g, PCSZ nsp, PCSZ cls, bool info)
     res = wp->Cobj->Next(0, &propname, &val, &type, NULL);
 
     if (FAILED(res)) {
-      sprintf(g->Message, "failed getting Next hr=%d\n", res);
+      snprintf(g->Message, sizeof(g->Message), "failed getting Next hr=%d\n", res);
       qrp = NULL;
       goto err;
     }  else if (res == WBEM_S_NO_MORE_DATA) {
@@ -340,7 +341,7 @@ bool WMIDEF::DefineAM(PGLOBAL g, LPCSTR am, int poff)
            !stricmp(Nspace, "root\\cli")   ? "Msft_CliAlias" : ""));
 
   if (!*Wclass) {
-    sprintf(g->Message, "Missing class name for %s", Nspace);
+    snprintf(g->Message, sizeof(g->Message), "Missing class name for %s", Nspace);
     return true;
   } else if (!strchr(Wclass, '_')) {
     char *p = (char*)PlugSubAlloc(g, NULL, strlen(Wclass) + 7);
@@ -363,7 +364,7 @@ PTDB WMIDEF::GetTable(PGLOBAL g, MODE m)
   else if (Catfunc == FNC_COL)
     return new(g) TDBWCL(this);
 
-  sprintf(g->Message, "Bad catfunc %ud for WMI", Catfunc);
+  snprintf(g->Message, sizeof(g->Message), "Bad catfunc %ud for WMI", Catfunc);
   return NULL;
   } // end of GetTable
 
@@ -423,7 +424,7 @@ bool TDBWMI::Initialize(PGLOBAL g)
   Res = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
 
   if (FAILED(Res)) {
-    sprintf(g->Message, "Failed to initialize COM library. " 
+    snprintf(g->Message, sizeof(g->Message), "Failed to initialize COM library. "
             "Error code = %x", Res);
     return true;              // Program has failed.
     } // endif Res
@@ -436,8 +437,8 @@ bool TDBWMI::Initialize(PGLOBAL g)
                          IID_IWbemLocator, (LPVOID*) &loc);
  
   if (FAILED(Res)) {
-    sprintf(g->Message, "Failed to create Locator. " 
-                        "Error code = %x", Res);
+    snprintf(g->Message, sizeof(g->Message), "Failed to create Locator. "
+             "Error code = %x", Res);
     CoUninitialize();
     return true;       // Program has failed.
     }  // endif Res
@@ -449,7 +450,7 @@ bool TDBWMI::Initialize(PGLOBAL g)
                              NULL, NULL,0, NULL, 0, 0, &Svc);
   
   if (FAILED(Res)) {
-    sprintf(g->Message, "Could not connect. Error code = %x", Res); 
+    snprintf(g->Message, sizeof(g->Message), "Could not connect. Error code = %x", Res); 
     loc->Release();     
     CoUninitialize();
     return true;                // Program has failed.
@@ -464,7 +465,7 @@ bool TDBWMI::Initialize(PGLOBAL g)
                           RPC_C_IMP_LEVEL_IMPERSONATE, NULL, EOAC_NONE);
 
   if (FAILED(Res)) {
-    sprintf(g->Message, "Could not set proxy. Error code = %x", Res);
+    snprintf(g->Message, sizeof(g->Message), "Could not set proxy. Error code = %x", Res);
     Svc->Release();
     CoUninitialize();
     return true;               // Program has failed.
@@ -512,7 +513,8 @@ char *TDBWMI::MakeWQL(PGLOBAL g)
       ncol++;
 
   if (ncol) {
-    colist = (char*)PlugSubAlloc(g, NULL, (NAM_LEN + 4) * ncol);
+    size_t colist_sz = (NAM_LEN + 4) * ncol;
+    colist = (char*)PlugSubAlloc(g, NULL, colist_sz);
 
     for (colp = Columns; colp; colp = colp->GetNext())
       if (!colp->IsSpecial()) {
@@ -521,10 +523,13 @@ char *TDBWMI::MakeWQL(PGLOBAL g)
 
         if (colp->GetColUse(U_P | U_J_EXT) || noloc) {
           if (first) {
-            strcpy(colist, colp->GetName());
+            snprintf(colist, colist_sz, colp->GetName());
             first = false;
-          } else
+          } else {
             strcat(strcat(colist, ", "), colp->GetName());
+            safe_strcat(colist, colist_sz, ", ");
+            safe_strcat(colist, colist_sz, colp->GetName());
+          }
       
           } // endif ColUse
 
@@ -534,18 +539,19 @@ char *TDBWMI::MakeWQL(PGLOBAL g)
     // ncol == 0 can occur for queries such that sql count(*) from...
     // for which we will count the rows from sql * from...
     colist = (char*)PlugSubAlloc(g, NULL, 2);
-    strcpy(colist, "*");
+    snprintf(colist, 2, "*");
   } // endif ncol
 
   // Below 14 is length of 'select ' + length of ' from ' + 1
   len = (strlen(colist) + strlen(Wclass) + 14);
   len += (To_CondFil ? strlen(To_CondFil->Body) + 7 : 0);
   wql = (char*)PlugSubAlloc(g, NULL, len);
-  strcat(strcat(strcpy(wql, "SELECT "), colist), " FROM ");
-  strcat(wql, Wclass);
+  snprintf(wql, len, "SELECT %s FROM %s", colist, Wclass);
 
-  if (To_CondFil)
-    strcat(strcat(wql, " WHERE "), To_CondFil->Body);
+  if (To_CondFil) {
+    safe_strcat(wql, len, " WHERE ");
+    safe_strcat(wql, len, To_CondFil->Body);
+  }
 
   return wql;
   } // end of MakeWQL
@@ -561,7 +567,7 @@ bool TDBWMI::GetWMIInfo(PGLOBAL g)
   char *cmd = MakeWQL(g);
 
   if (cmd == NULL) {
-    sprintf(g->Message, "Error making WQL statement"); 
+    snprintf(g->Message, sizeof(g->Message), "Error making WQL statement");
     Svc->Release();
     CoUninitialize();
     return true;               // Program has failed.
@@ -574,7 +580,7 @@ bool TDBWMI::GetWMIInfo(PGLOBAL g)
       NULL, &Enumerator);
   
   if (FAILED(Rc)) {
-    sprintf(g->Message, "Query %s failed. Error code = %x", cmd, Rc); 
+    snprintf(g->Message, sizeof(g->Message), "Query %s failed. Error code = %x", cmd, Rc);
     Svc->Release();
     CoUninitialize();
     return true;               // Program has failed.
@@ -654,13 +660,13 @@ bool TDBWMI::OpenDB(PGLOBAL g)
     /*******************************************************************/
     /* WMI tables cannot be modified.                                  */
     /*******************************************************************/
-    strcpy(g->Message, "WMI tables are read only");
+    safe_strcpy(g->Message, sizeof(g->Message), "WMI tables are read only");
     return true;
     } // endif Mode
 
   if (!To_CondFil && !stricmp(Wclass, "CIM_Datafile")
                   && !stricmp(Nspace, "root\\cimv2")) {
-    strcpy(g->Message, 
+    safe_strcpy(g->Message, sizeof(g->Message), 
       "Would last forever when not filtered, use DIR table instead");
     return true;
   } else
@@ -697,7 +703,7 @@ int TDBWMI::ReadDB(PGLOBAL g)
 /***********************************************************************/
 int TDBWMI::WriteDB(PGLOBAL g)
   {
-  strcpy(g->Message, "WMI tables are read only");
+  safe_strcpy(g->Message, sizeof(g->Message), "WMI tables are read only");
   return RC_FX;
   } // end of WriteDB
 
@@ -706,7 +712,7 @@ int TDBWMI::WriteDB(PGLOBAL g)
 /***********************************************************************/
 int TDBWMI::DeleteDB(PGLOBAL g, int irc)
   {
-  strcpy(g->Message, "Delete not enabled for WMI tables");
+  safe_strcpy(g->Message, sizeof(g->Message), "Delete not enabled for WMI tables");
   return RC_FX;
   } // end of DeleteDB
 
@@ -771,7 +777,7 @@ void WMICOL::ReadColumn(PGLOBAL g)
       break;
     case VT_I4:
     case VT_UI4:
-      Value->SetValue(Prop.lVal);
+      Value->SetValue((long long)Prop.lVal);
       break;
     case VT_I2:
     case VT_UI2:
@@ -810,7 +816,7 @@ void WMICOL::ReadColumn(PGLOBAL g)
           char       buf[24];
           int        rc = VariantTimeToSystemTime(Prop.date, &stm);
 
-          sprintf(buf, "%02d/%02d/%d %02d:%02d:%02d", 
+          snprintf(buf, sizeof(buf), "%02d/%02d/%d %02d:%02d:%02d", 
                        stm.wDay, stm.wMonth, stm.wYear,
                        stm.wHour, stm.wMinute, stm.wSecond);
           Value->SetValue_psz(buf);

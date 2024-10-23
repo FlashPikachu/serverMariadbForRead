@@ -6,7 +6,7 @@ SET NAMES utf8;
 call mtr.add_suppression("Table rebuild required");
 show create table mysql_json_test;
 ERROR HY000: Table rebuild required. Please do "ALTER TABLE `test.mysql_json_test` FORCE" or dump/reload to fix it!
-Phase 1/7: Checking and upgrading mysql database
+Phase 1/8: Checking and upgrading mysql database
 Processing databases
 mysql
 mysql.column_stats                                 OK
@@ -54,8 +54,9 @@ error    : Corrupt
 mysql.transaction_registry
 Error    : Unknown storage engine 'InnoDB'
 error    : Corrupt
-Phase 2/7: Installing used storage engines... Skipped
-Phase 3/7: Fixing views
+Phase 2/8: Installing used storage engines... Skipped
+Phase 3/8: Running 'mysql_fix_privilege_tables'
+Phase 4/8: Fixing views
 mysql.user                                         OK
 sys.host_summary                                   OK
 sys.host_summary_by_file_io                        OK
@@ -157,9 +158,8 @@ sys.x$wait_classes_global_by_latency               OK
 sys.x$waits_by_host_by_latency                     OK
 sys.x$waits_by_user_by_latency                     OK
 sys.x$waits_global_by_latency                      OK
-Phase 4/7: Running 'mysql_fix_privilege_tables'
-Phase 5/7: Fixing table and database names
-Phase 6/7: Checking and upgrading tables
+Phase 5/8: Fixing table and database names
+Phase 6/8: Checking and upgrading tables
 Processing databases
 information_schema
 mtr
@@ -175,20 +175,21 @@ test.mysql_json_test_big                           Needs upgrade
 Repairing tables
 test.mysql_json_test                               OK
 test.mysql_json_test_big                           OK
-Phase 7/7: Running 'FLUSH PRIVILEGES'
+Phase 7/8: uninstalling plugins
+Phase 8/8: Running 'FLUSH PRIVILEGES'
 OK
 show create table mysql_json_test;
 Table	Create Table
 mysql_json_test	CREATE TABLE `mysql_json_test` (
-  `description` varchar(100) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
-  `expected` longtext COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `description` varchar(100) DEFAULT NULL,
+  `expected` longtext DEFAULT NULL,
   `actual` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL
 ) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 show create table mysql_json_test_big;
 Table	Create Table
 mysql_json_test_big	CREATE TABLE `mysql_json_test_big` (
-  `description` varchar(100) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
-  `expected` longtext COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `description` varchar(100) DEFAULT NULL,
+  `expected` longtext DEFAULT NULL,
   `actual` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL
 ) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 select * from mysql.plugin;

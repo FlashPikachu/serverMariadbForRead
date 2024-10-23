@@ -67,6 +67,7 @@ support cross-platform development and expose comonly used SQL names. */
 
 #include <my_global.h>
 #include "my_counter.h"
+#include "aligned.h"
 #include <m_string.h>
 #include <mysqld_error.h>
 
@@ -99,15 +100,6 @@ HAVE_PSI_INTERFACE is defined. */
 # ifdef HAVE_PSI_MEMORY_INTERFACE
 #  define UNIV_PFS_MEMORY
 # endif /* HAVE_PSI_MEMORY_INTERFACE */
-
-/* There are mutexes/rwlocks that we want to exclude from
-instrumentation even if their corresponding performance schema
-define is set. And this PFS_NOT_INSTRUMENTED is used
-as the key value to identify those objects that would
-be excluded from instrumentation. */
-# define PFS_NOT_INSTRUMENTED		ULINT32_UNDEFINED
-
-# define PFS_IS_INSTRUMENTED(key)	((key) != PFS_NOT_INSTRUMENTED)
 
 #ifdef HAVE_PFS_THREAD_PROVIDER_H
 /* For PSI_MUTEX_CALL() and similar. */
@@ -190,9 +182,6 @@ using the call command. */
 #define FTS_INTERNAL_DIAG_PRINT                 /* FTS internal debugging
                                                 info output */
 #endif
-
-#define UNIV_BTR_DEBUG				/* check B-tree links */
-#define UNIV_LIGHT_MEM_DEBUG			/* light memory debugging */
 
 // #define UNIV_SQL_DEBUG
 
@@ -425,7 +414,7 @@ contains the sum of the following flag and the locally stored len. */
 #endif /* CHECK FOR GCC VER_GT_2 */
 
 /* Some macros to improve branch prediction and reduce cache misses */
-#if defined(COMPILER_HINTS) && defined(__GNUC__)
+#ifdef __GNUC__
 /* Tell the compiler that 'expr' probably evaluates to 'constant'. */
 # define UNIV_EXPECT(expr,constant) __builtin_expect(expr, constant)
 /* Tell the compiler that a pointer is likely to be NULL */
@@ -445,16 +434,11 @@ it is read or written. */
 # define UNIV_EXPECT(expr,value) (expr)
 # define UNIV_LIKELY_NULL(expr) (expr)
 
-# if defined(COMPILER_HINTS)
 //# define UNIV_PREFETCH_R(addr) sun_prefetch_read_many((void*) addr)
-#  define UNIV_PREFETCH_R(addr) ((void) 0)
-#  define UNIV_PREFETCH_RW(addr) sun_prefetch_write_many(addr)
-# else
-#  define UNIV_PREFETCH_R(addr) ((void) 0)
-#  define UNIV_PREFETCH_RW(addr) ((void) 0)
-# endif /* COMPILER_HINTS */
+# define UNIV_PREFETCH_R(addr) ((void) 0)
+# define UNIV_PREFETCH_RW(addr) sun_prefetch_write_many(addr)
 
-# elif defined _MSC_VER && defined COMPILER_HINTS
+# elif defined _MSC_VER
 # define UNIV_EXPECT(expr,value) (expr)
 # define UNIV_LIKELY_NULL(expr) (expr)
 # if defined _M_IX86 || defined _M_X64
@@ -510,7 +494,6 @@ extern mysql_pfs_key_t fts_cache_mutex_key;
 extern mysql_pfs_key_t fts_cache_init_mutex_key;
 extern mysql_pfs_key_t fts_delete_mutex_key;
 extern mysql_pfs_key_t fts_doc_id_mutex_key;
-extern mysql_pfs_key_t fts_pll_tokenize_mutex_key;
 extern mysql_pfs_key_t ibuf_bitmap_mutex_key;
 extern mysql_pfs_key_t ibuf_mutex_key;
 extern mysql_pfs_key_t ibuf_pessimistic_insert_mutex_key;
@@ -529,8 +512,6 @@ extern mysql_pfs_key_t trx_pool_mutex_key;
 extern mysql_pfs_key_t trx_pool_manager_mutex_key;
 extern mysql_pfs_key_t lock_wait_mutex_key;
 extern mysql_pfs_key_t srv_threads_mutex_key;
-extern mysql_pfs_key_t thread_mutex_key;
-extern mysql_pfs_key_t row_drop_list_mutex_key;
 # endif /* UNIV_PFS_MUTEX */
 
 # ifdef UNIV_PFS_RWLOCK

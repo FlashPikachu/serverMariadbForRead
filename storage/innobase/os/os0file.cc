@@ -51,7 +51,6 @@ Created 10/21/1995 Heikki Tuuri
 #ifdef HAVE_LINUX_UNISTD_H
 #include "unistd.h"
 #endif
-#include "os0thread.h"
 #include "buf0dblwr.h"
 
 #include <tpool_structs.h>
@@ -74,7 +73,6 @@ Created 10/21/1995 Heikki Tuuri
 
 #include <thread>
 #include <chrono>
-#include <memory>
 
 /* Per-IO operation environment*/
 class io_slots
@@ -114,7 +112,7 @@ public:
 
 	size_t pending_io_count()
 	{
-		return (size_t)m_max_aio - m_cache.size();
+		return m_cache.pos();
 	}
 
 	tpool::task_group* get_task_group()
@@ -126,10 +124,15 @@ public:
 	{
 		wait();
 	}
+
+	mysql_mutex_t& mutex()
+	{
+		return m_cache.mutex();
+	}
 };
 
-static std::unique_ptr<io_slots> read_slots;
-static std::unique_ptr<io_slots> write_slots;
+static io_slots *read_slots;
+static io_slots *write_slots;
 
 /** Number of retries for partial I/O's */
 constexpr ulint NUM_RETRIES_ON_PARTIAL_IO = 10;
@@ -172,7 +175,7 @@ mysql_pfs_key_t  innodb_temp_file_key;
 @param[in]	should_abort	whether to abort on an unknown error
 @param[in]	on_error_silent	whether to suppress reports of non-fatal errors
 @return true if we should retry the operation */
-static MY_ATTRIBUTE((warn_unused_result))
+static
 bool
 os_file_handle_error_cond_exit(
 	const char*	name,
@@ -310,26 +313,13 @@ private:
   os_offset_t m_offset;
 };
 
-#undef USE_FILE_LOCK
-#ifndef _WIN32
-/* On Windows, mandatory locking is used */
-# define USE_FILE_LOCK
-#endif
-#ifdef USE_FILE_LOCK
+#ifndef _WIN32 /* On Microsoft Windows, mandatory locking is used */
 /** Obtain an exclusive lock on a file.
-@param[in]	fd		file descriptor
-@param[in]	name		file name
+@param fd      file descriptor
+@param name    file name
 @return 0 on success */
-static
-int
-os_file_lock(
-	int		fd,
-	const char*	name)
+int os_file_lock(int fd, const char *name)
 {
-	if (my_disable_locking) {
-		return 0;
-	}
-
 	struct flock lk;
 
 	lk.l_type = F_WRLCK;
@@ -355,7 +345,7 @@ os_file_lock(
 
 	return(0);
 }
-#endif /* USE_FILE_LOCK */
+#endif /* !_WIN32 */
 
 
 /** Create a temporary file. This function is like tmpfile(3), but
@@ -405,46 +395,6 @@ os_file_read_string(
 
 		str[flen] = '\0';
 	}
-}
-
-/** This function returns a new path name after replacing the basename
-in an old path with a new basename.  The old_path is a full path
-name including the extension.  The tablename is in the normal
-form "databasename/tablename".  The new base name is found after
-the forward slash.  Both input strings are null terminated.
-
-This function allocates memory to be returned.  It is the callers
-responsibility to free the return value after it is no longer needed.
-
-@param[in]	old_path		Pathname
-@param[in]	tablename		Contains new base name
-@return own: new full pathname */
-char *os_file_make_new_pathname(const char *old_path, const char *tablename)
-{
-  /* Split the tablename into its database and table name components.
-  They are separated by a '/'. */
-  const char *last_slash= strrchr(tablename, '/');
-  const char *base_name= last_slash ? last_slash + 1 : tablename;
-
-  /* Find the offset of the last slash. We will strip off the
-  old basename.ibd which starts after that slash. */
-  last_slash = strrchr(old_path, '/');
-#ifdef _WIN32
-  if (const char *last= strrchr(old_path, '\\'))
-    if (last > last_slash)
-      last_slash= last;
-#endif
-
-  size_t dir_len= last_slash
-    ? size_t(last_slash - old_path)
-    : strlen(old_path);
-
-  /* allocate a new path and move the old directory path to it. */
-  size_t new_path_len= dir_len + strlen(base_name) + sizeof "/.ibd";
-  char *new_path= static_cast<char*>(ut_malloc_nokey(new_path_len));
-  memcpy(new_path, old_path, dir_len);
-  snprintf(new_path + dir_len, new_path_len - dir_len, "/%s.ibd", base_name);
-  return new_path;
 }
 
 /** This function reduces a null-terminated full remote path name into
@@ -773,7 +723,7 @@ os_file_punch_hole_posix(
 
 	return(DB_IO_ERROR);
 
-#elif defined(UNIV_SOLARIS)
+#elif defined __sun__
 
 	// Use F_FREESP
 
@@ -782,22 +732,16 @@ os_file_punch_hole_posix(
 	return(DB_IO_NO_PUNCH_HOLE);
 }
 
-
-
 /** Retrieves the last error number if an error occurs in a file io function.
 The number should be retrieved before any other OS calls (because they may
 overwrite the error number). If the number is not known to this program,
 the OS error number + 100 is returned.
 @param[in]	report_all_errors	true if we want an error message
-					printed of all errors
+                                        printed of all errors
 @param[in]	on_error_silent		true then don't print any diagnostic
 					to the log
 @return error number, or OS error number + 100 */
-static
-ulint
-os_file_get_last_error_low(
-	bool	report_all_errors,
-	bool	on_error_silent)
+ulint os_file_get_last_error(bool report_all_errors, bool on_error_silent)
 {
 	int	err = errno;
 
@@ -842,6 +786,7 @@ os_file_get_last_error_low(
 	case EXDEV:
 	case ENOTDIR:
 	case EISDIR:
+	case EPERM:
 		return(OS_FILE_PATH_ERROR);
 	case EAGAIN:
 		if (srv_use_native_aio) {
@@ -1095,6 +1040,7 @@ os_file_create_simple_func(
 	we open the same file in the same mode, see man page of open(2). */
 	if (!srv_read_only_mode && *success) {
 		switch (srv_file_flush_method) {
+		case SRV_O_DSYNC:
 		case SRV_O_DIRECT:
 		case SRV_O_DIRECT_NO_FSYNC:
 			os_file_set_nocache(file, name, mode_str);
@@ -1104,17 +1050,18 @@ os_file_create_simple_func(
 		}
 	}
 
-#ifdef USE_FILE_LOCK
+#ifndef _WIN32
 	if (!read_only
 	    && *success
-	    && (access_type == OS_FILE_READ_WRITE)
+	    && access_type == OS_FILE_READ_WRITE
+	    && !my_disable_locking
 	    && os_file_lock(file, name)) {
 
 		*success = false;
 		close(file);
 		file = -1;
 	}
-#endif /* USE_FILE_LOCK */
+#endif /* !_WIN32 */
 
 	return(file);
 }
@@ -1278,15 +1225,15 @@ os_file_create_func(
 		return file;
 	}
 
-#if (defined(UNIV_SOLARIS) && defined(DIRECTIO_ON)) || defined O_DIRECT
+#if (defined __sun__ && defined DIRECTIO_ON) || defined O_DIRECT
 	if (type == OS_DATA_FILE) {
-# ifdef __linux__
-use_o_direct:
-# endif
 		switch (srv_file_flush_method) {
 		case SRV_O_DSYNC:
 		case SRV_O_DIRECT:
 		case SRV_O_DIRECT_NO_FSYNC:
+# ifdef __linux__
+use_o_direct:
+# endif
 			os_file_set_nocache(file, name, mode_str);
 			break;
 		default:
@@ -1303,9 +1250,6 @@ use_o_direct:
 			goto skip_o_direct;
 		}
 		MSAN_STAT_WORKAROUND(&st);
-		if (st.st_size & 4095) {
-			goto skip_o_direct;
-		}
 		if (snprintf(b, sizeof b,
 			     "/sys/dev/block/%u:%u/queue/physical_block_size",
 			     major(st.st_dev), minor(st.st_dev))
@@ -1338,19 +1282,27 @@ use_o_direct:
 			if (s > 4096 || s < 64 || !ut_is_2pow(s)) {
 				goto skip_o_direct;
 			}
+			log_sys.log_maybe_unbuffered= true;
 			log_sys.set_block_size(uint32_t(s));
-			goto use_o_direct;
+			if (!log_sys.log_buffered && !(st.st_size & (s - 1))) {
+				goto use_o_direct;
+			}
 		} else {
 skip_o_direct:
-			log_sys.set_block_size(0);
+			log_sys.log_maybe_unbuffered= false;
+			log_sys.log_buffered= true;
+			log_sys.set_block_size(512);
 		}
 	}
 # endif
 #endif
 
-#ifdef USE_FILE_LOCK
+#ifndef _WIN32
 	if (!read_only
-	    && create_mode != OS_FILE_OPEN_RAW && os_file_lock(file, name)) {
+	    && create_mode != OS_FILE_OPEN_RAW
+	    && !my_disable_locking
+	    && os_file_lock(file, name)) {
+
 		if (create_mode == OS_FILE_OPEN_RETRY) {
 			ib::info()
 				<< "Retrying to lock the first data file";
@@ -1373,7 +1325,7 @@ skip_o_direct:
 		close(file);
 		file = -1;
 	}
-#endif /* USE_FILE_LOCK */
+#endif /* !_WIN32 */
 
 	return(file);
 }
@@ -1446,10 +1398,11 @@ os_file_create_simple_no_error_handling_func(
 
 	*success = (file != -1);
 
-#ifdef USE_FILE_LOCK
+#ifndef _WIN32
 	if (!read_only
 	    && *success
 	    && access_type == OS_FILE_READ_WRITE
+	    && !my_disable_locking
 	    && os_file_lock(file, name)) {
 
 		*success = false;
@@ -1457,7 +1410,7 @@ os_file_create_simple_no_error_handling_func(
 		file = -1;
 
 	}
-#endif /* USE_FILE_LOCK */
+#endif /* !_WIN32 */
 
 	return(file);
 }
@@ -1849,16 +1802,13 @@ bool os_file_flush_func(os_file_t file)
 The number should be retrieved before any other OS calls (because they may
 overwrite the error number). If the number is not known to this program,
 then OS error number + OS_FILE_ERROR_MAX is returned.
-@param[in]	report_all_errors	true if we want an error message printed
-					of all errors
+@param[in]	report_all_errors	true if we want an error message
+printed of all errors
 @param[in]	on_error_silent		true then don't print any diagnostic
 					to the log
 @return error number, or OS error number + OS_FILE_ERROR_MAX */
-static
-ulint
-os_file_get_last_error_low(
-	bool	report_all_errors,
-	bool	on_error_silent)
+ulint os_file_get_last_error(bool report_all_errors, bool on_error_silent)
+
 {
 	ulint	err = (ulint) GetLastError();
 
@@ -2097,7 +2047,7 @@ os_file_create_directory(
 }
 
 /** Get disk sector size for a file. */
-size_t get_sector_size(HANDLE file)
+static size_t get_sector_size(HANDLE file)
 {
   FILE_STORAGE_INFO fsi;
   ULONG s= 4096;
@@ -2105,9 +2055,7 @@ size_t get_sector_size(HANDLE file)
   {
     s= fsi.PhysicalBytesPerSectorForPerformance;
     if (s > 4096 || s < 64 || !ut_is_2pow(s))
-    {
       return 4096;
-    }
   }
   return s;
 }
@@ -2205,8 +2153,9 @@ os_file_create_func(
 		? FILE_FLAG_OVERLAPPED : 0;
 
 	if (type == OS_LOG_FILE) {
-		if(srv_flush_log_at_trx_commit != 2 && !log_sys.is_opened())
+		if (!log_sys.is_opened() && !log_sys.log_buffered) {
 			attributes|= FILE_FLAG_NO_BUFFERING;
+		}
 		if (srv_file_flush_method == SRV_O_DSYNC)
 			attributes|= FILE_FLAG_WRITE_THROUGH;
 	}
@@ -2237,21 +2186,22 @@ os_file_create_func(
 			name, access, share_mode, my_win_file_secattr(),
 			create_flag, attributes, NULL);
 
-		if (file != INVALID_HANDLE_VALUE && type == OS_LOG_FILE
-			&& (attributes & FILE_FLAG_NO_BUFFERING)) {
-			uint32 s= (uint32_t) get_sector_size(file);
-			log_sys.set_block_size(uint32_t(s));
-			/* FIXME! remove it when backup is fixed, so that it
-				does not produce redo with irregular sizes.*/
-			if (os_file_get_size(file) % s) {
-				attributes &= ~FILE_FLAG_NO_BUFFERING;
-				create_flag = OPEN_ALWAYS;
-				CloseHandle(file);
-				continue;
+		*success = file != INVALID_HANDLE_VALUE;
+
+		if (*success && type == OS_LOG_FILE) {
+			uint32_t s = uint32_t(get_sector_size(file));
+			log_sys.set_block_size(s);
+			if (attributes & FILE_FLAG_NO_BUFFERING) {
+				if (os_file_get_size(file) % s) {
+					attributes &= ~FILE_FLAG_NO_BUFFERING;
+					create_flag = OPEN_ALWAYS;
+					CloseHandle(file);
+					continue;
+				}
+				log_sys.log_buffered = false;
 			}
 		}
 
-		*success = (file != INVALID_HANDLE_VALUE);
 		if (*success) {
 			break;
 		}
@@ -2799,15 +2749,15 @@ os_file_io(
 		bytes_returned += n_bytes;
 
 		if (type.type != IORequest::READ_MAYBE_PARTIAL) {
-			const char*	op = type.is_read()
-				? "read" : "written";
-
-			ib::warn()
-				<< n
-				<< " bytes should have been " << op << ". Only "
-				<< bytes_returned
-				<< " bytes " << op << ". Retrying"
-				<< " for the remaining bytes.";
+			sql_print_warning("InnoDB: %zu bytes should have been"
+					  " %s at %llu from %s,"
+					  " but got only %zd."
+					  " Retrying.",
+					  n, type.is_read()
+					  ? "read" : "written", offset,
+					  type.node
+					  ? type.node->name
+					  : "(unknown file)", bytes_returned);
 		}
 
 		/* Advance the offset and buffer by n_bytes */
@@ -2830,10 +2780,11 @@ os_file_io(
 @param[in]	type		IO context
 @param[in]	file		handle to an open file
 @param[out]	buf		buffer from which to write
-@param[in]	n		number of bytes to read, starting from offset
-@param[in]	offset		file offset from the start where to read
+@param[in]	n		number of bytes to write, starting from offset
+@param[in]	offset		file offset from the start where to write
 @param[out]	err		DB_SUCCESS or error code
-@return number of bytes written, -1 if error */
+@return number of bytes written
+@retval -1 on error */
 static MY_ATTRIBUTE((warn_unused_result))
 ssize_t
 os_file_pwrite(
@@ -2947,66 +2898,38 @@ os_file_pread(
 @param[in]	offset		file offset from the start where to read
 @param[in]	n		number of bytes to read, starting from offset
 @param[out]	o		number of bytes actually read
-@param[in]	exit_on_err	if true then exit on error
 @return DB_SUCCESS or error code */
-static MY_ATTRIBUTE((warn_unused_result))
 dberr_t
-os_file_read_page(
+os_file_read_func(
 	const IORequest&	type,
 	os_file_t	file,
 	void*			buf,
 	os_offset_t		offset,
 	ulint			n,
-	ulint*			o,
-	bool			exit_on_err)
+	ulint*			o)
 {
-	dberr_t		err;
+  ut_ad(!type.node || type.node->handle == file);
+  ut_ad(n);
 
-	os_bytes_read_since_printout += n;
+  os_bytes_read_since_printout+= n;
 
-	ut_ad(n > 0);
+  dberr_t err;
+  ssize_t n_bytes= os_file_pread(type, file, buf, n, offset, &err);
 
-	ssize_t	n_bytes = os_file_pread(type, file, buf, n, offset, &err);
+  if (o)
+    *o= ulint(n_bytes);
 
-	if (o) {
-		*o = n_bytes;
-	}
+  if (ulint(n_bytes) == n || err != DB_SUCCESS)
+    return err;
 
-	if (ulint(n_bytes) == n || (err != DB_SUCCESS && !exit_on_err)) {
-		return err;
-	}
-	int os_err = IF_WIN((int)GetLastError(), errno);
+  os_file_handle_error_cond_exit(type.node ? type.node->name : nullptr, "read",
+                                 false, false);
+  sql_print_error("InnoDB: Tried to read %zu bytes at offset %llu"
+                  " of file %s, but was only able to read %zd",
+                  n, offset, type.node ? type.node->name : "(unknown)",
+                  n_bytes);
 
-	if (!os_file_handle_error_cond_exit(
-		    NULL, "read", exit_on_err, false)) {
-		ib::fatal()
-			<< "Tried to read " << n << " bytes at offset "
-			<< offset << ", but was only able to read " << n_bytes
-			<< ".Cannot read from file. OS error number "
-			<< os_err << ".";
-	} else {
-		ib::error() << "Tried to read " << n << " bytes at offset "
-		<< offset << ", but was only able to read " << n_bytes;
-	}
-	if (err == DB_SUCCESS) {
-		err = DB_IO_ERROR;
-	}
-
-	return err;
-}
-
-/** Retrieves the last error number if an error occurs in a file io function.
-The number should be retrieved before any other OS calls (because they may
-overwrite the error number). If the number is not known to this program,
-the OS error number + 100 is returned.
-@param[in]	report_all_errors	true if we want an error printed
-					for all errors
-@return error number, or OS error number + 100 */
-ulint
-os_file_get_last_error(
-	bool	report_all_errors)
-{
-	return(os_file_get_last_error_low(report_all_errors, false));
+  return err ? err : DB_IO_ERROR;
 }
 
 /** Handle errors for file operations.
@@ -3025,7 +2948,7 @@ os_file_handle_error_cond_exit(
 {
 	ulint	err;
 
-	err = os_file_get_last_error_low(false, on_error_silent);
+	err = os_file_get_last_error(false, on_error_silent);
 
 	switch (err) {
 	case OS_FILE_DISK_FULL:
@@ -3116,7 +3039,7 @@ os_file_set_nocache(
 	const char*	operation_name	MY_ATTRIBUTE((unused)))
 {
 	/* some versions of Solaris may not have DIRECTIO_ON */
-#if defined(UNIV_SOLARIS) && defined(DIRECTIO_ON)
+#if defined(__sun__) && defined(DIRECTIO_ON)
 	if (directio(fd, DIRECTIO_ON) == -1) {
 		int	errno_save = errno;
 
@@ -3145,7 +3068,7 @@ os_file_set_nocache(
 				<< ", continuing anyway.";
 		}
 	}
-#endif /* defined(UNIV_SOLARIS) && defined(DIRECTIO_ON) */
+#endif /* defined(__sun__) && defined(DIRECTIO_ON) */
 }
 
 #endif /* _WIN32 */
@@ -3348,51 +3271,6 @@ os_file_truncate(
 #endif /* _WIN32 */
 }
 
-/** NOTE! Use the corresponding macro os_file_read(), not directly this
-function!
-Requests a synchronous positioned read operation.
-@return DB_SUCCESS if request was successful, DB_IO_ERROR on failure
-@param[in]	type		IO flags
-@param[in]	file		handle to an open file
-@param[out]	buf		buffer where to read
-@param[in]	offset		file offset from the start where to read
-@param[in]	n		number of bytes to read, starting from offset
-@return error code
-@retval	DB_SUCCESS	if the operation succeeded */
-dberr_t
-os_file_read_func(
-	const IORequest&	type,
-	os_file_t		file,
-	void*			buf,
-	os_offset_t		offset,
-	ulint			n)
-{
-	return(os_file_read_page(type, file, buf, offset, n, NULL, true));
-}
-
-/** NOTE! Use the corresponding macro os_file_read_no_error_handling(),
-not directly this function!
-Requests a synchronous positioned read operation.
-@return DB_SUCCESS if request was successful, DB_IO_ERROR on failure
-@param[in]	type		IO flags
-@param[in]	file		handle to an open file
-@param[out]	buf		buffer where to read
-@param[in]	offset		file offset from the start where to read
-@param[in]	n		number of bytes to read, starting from offset
-@param[out]	o		number of bytes actually read
-@return DB_SUCCESS or error code */
-dberr_t
-os_file_read_no_error_handling_func(
-	const IORequest&	type,
-	os_file_t	file,
-	void*			buf,
-	os_offset_t		offset,
-	ulint			n,
-	ulint*			o)
-{
-	return(os_file_read_page(type, file, buf, offset, n, o, false));
-}
-
 /** Check the existence and type of the given file.
 @param[in]	path		path name of file
 @param[out]	exists		true if the file exists
@@ -3533,29 +3411,43 @@ os_file_get_status(
 	return(ret);
 }
 
-
-extern void fil_aio_callback(const IORequest &request);
-
-static void io_callback(tpool::aiocb *cb)
+static void fake_io_callback(void *c)
 {
-  ut_a(cb->m_err == DB_SUCCESS);
+  tpool::aiocb *cb= static_cast<tpool::aiocb*>(c);
+  ut_ad(read_slots->contains(cb));
+  static_cast<const IORequest*>(static_cast<const void*>(cb->m_userdata))->
+    fake_read_complete(cb->m_offset);
+  read_slots->release(cb);
+}
+
+static void read_io_callback(void *c)
+{
+  tpool::aiocb *cb= static_cast<tpool::aiocb*>(c);
+  ut_ad(cb->m_opcode == tpool::aio_opcode::AIO_PREAD);
+  ut_ad(read_slots->contains(cb));
+  const IORequest &request= *static_cast<const IORequest*>
+    (static_cast<const void*>(cb->m_userdata));
+  request.read_complete(cb->m_err);
+  read_slots->release(cb);
+}
+
+static void write_io_callback(void *c)
+{
+  tpool::aiocb *cb= static_cast<tpool::aiocb*>(c);
+  ut_ad(cb->m_opcode == tpool::aio_opcode::AIO_PWRITE);
+  ut_ad(write_slots->contains(cb));
   const IORequest &request= *static_cast<const IORequest*>
     (static_cast<const void*>(cb->m_userdata));
 
-  /* Return cb back to cache*/
-  if (cb->m_opcode == tpool::aio_opcode::AIO_PREAD)
-  {
-    ut_ad(read_slots->contains(cb));
-    fil_aio_callback(request);
-    read_slots->release(cb);
-  }
-  else
-  {
-    ut_ad(write_slots->contains(cb));
-    const IORequest req{request};
-    write_slots->release(cb);
-    fil_aio_callback(req);
-  }
+  if (UNIV_UNLIKELY(cb->m_err != 0))
+    ib::info () << "IO Error: " << cb->m_err
+                << "during write of "
+                << cb->m_len << " bytes, for file "
+                << request.node->name << "(" << cb->m_fh << "), returned "
+                << cb->m_ret_len;
+
+  request.write_complete(cb->m_err);
+  write_slots->release(cb);
 }
 
 #ifdef LINUX_NATIVE_AIO
@@ -3691,10 +3583,6 @@ int os_aio_init()
   int max_read_events= int(srv_n_read_io_threads *
                            OS_AIO_N_PENDING_IOS_PER_THREAD);
   int max_events= max_read_events + max_write_events;
-
-  read_slots.reset(new io_slots(max_read_events, srv_n_read_io_threads));
-  write_slots.reset(new io_slots(max_write_events, srv_n_write_io_threads));
-
   int ret;
 #if LINUX_NATIVE_AIO
   if (srv_use_native_aio && !is_linux_native_aio_supported())
@@ -3725,12 +3613,11 @@ disable:
   }
 #endif
 
-  if (ret)
+  if (!ret)
   {
-    read_slots.reset();
-    write_slots.reset();
+    read_slots= new io_slots(max_read_events, srv_n_read_io_threads);
+    write_slots= new io_slots(max_write_events, srv_n_write_io_threads);
   }
-
   return ret;
 }
 
@@ -3738,14 +3625,16 @@ disable:
 void os_aio_free()
 {
   srv_thread_pool->disable_aio();
-  read_slots.reset();
-  write_slots.reset();
+  delete read_slots;
+  delete write_slots;
+  read_slots= nullptr;
+  write_slots= nullptr;
 }
 
 /** Wait until there are no pending asynchronous writes. */
-static void os_aio_wait_until_no_pending_writes_low()
+static void os_aio_wait_until_no_pending_writes_low(bool declare)
 {
-  bool notify_wait = write_slots->pending_io_count() > 0;
+  const bool notify_wait= declare && write_slots->pending_io_count();
 
   if (notify_wait)
     tpool::tpool_wait_begin();
@@ -3756,17 +3645,43 @@ static void os_aio_wait_until_no_pending_writes_low()
      tpool::tpool_wait_end();
 }
 
-/** Wait until there are no pending asynchronous writes. */
-void os_aio_wait_until_no_pending_writes()
+/** Wait until there are no pending asynchronous writes.
+@param declare  whether the wait will be declared in tpool */
+void os_aio_wait_until_no_pending_writes(bool declare)
 {
-  os_aio_wait_until_no_pending_writes_low();
+  os_aio_wait_until_no_pending_writes_low(declare);
   buf_dblwr.wait_flush_buffered_writes();
 }
 
-/** Wait until all pending asynchronous reads have completed. */
-void os_aio_wait_until_no_pending_reads()
+/** @return number of pending reads */
+size_t os_aio_pending_reads()
 {
-  const auto notify_wait= read_slots->pending_io_count();
+  mysql_mutex_lock(&read_slots->mutex());
+  size_t pending= read_slots->pending_io_count();
+  mysql_mutex_unlock(&read_slots->mutex());
+  return pending;
+}
+
+/** @return approximate number of pending reads */
+size_t os_aio_pending_reads_approx()
+{
+  return read_slots->pending_io_count();
+}
+
+/** @return number of pending writes */
+size_t os_aio_pending_writes()
+{
+  mysql_mutex_lock(&write_slots->mutex());
+  size_t pending= write_slots->pending_io_count();
+  mysql_mutex_unlock(&write_slots->mutex());
+  return pending;
+}
+
+/** Wait until all pending asynchronous reads have completed.
+@param declare  whether the wait will be declared in tpool */
+void os_aio_wait_until_no_pending_reads(bool declare)
+{
+  const bool notify_wait= declare && read_slots->pending_io_count();
 
   if (notify_wait)
     tpool::tpool_wait_begin();
@@ -3776,6 +3691,28 @@ void os_aio_wait_until_no_pending_reads()
   if (notify_wait)
     tpool::tpool_wait_end();
 }
+
+/** Submit a fake read request during crash recovery.
+@param type  fake read request
+@param offset additional context */
+void os_fake_read(const IORequest &type, os_offset_t offset)
+{
+  tpool::aiocb *cb= read_slots->acquire();
+
+  cb->m_group= read_slots->get_task_group();
+  cb->m_fh= type.node->handle.m_file;
+  cb->m_buffer= nullptr;
+  cb->m_len= 0;
+  cb->m_offset= offset;
+  cb->m_opcode= tpool::aio_opcode::AIO_PREAD;
+  new (cb->m_userdata) IORequest{type};
+  cb->m_internal_task.m_func= fake_io_callback;
+  cb->m_internal_task.m_arg= cb;
+  cb->m_internal_task.m_group= cb->m_group;
+
+  srv_thread_pool->submit_task(&cb->m_internal_task);
+}
+
 
 /** Request a read or write.
 @param type		I/O request
@@ -3811,7 +3748,7 @@ dberr_t os_aio(const IORequest &type, void *buf, os_offset_t offset, size_t n)
 	if (!type.is_async()) {
 		err = type.is_read()
 			? os_file_read_func(type, type.node->handle,
-					    buf, offset, n)
+					    buf, offset, n, nullptr)
 			: os_file_write_func(type, type.node->name,
 					     type.node->handle,
 					     buf, offset, n);
@@ -3822,23 +3759,32 @@ func_exit:
 		return err;
 	}
 
+	io_slots* slots;
+	tpool::callback_func callback;
+	tpool::aio_opcode opcode;
+
 	if (type.is_read()) {
 		++os_n_file_reads;
+		slots = read_slots;
+		callback = read_io_callback;
+		opcode = tpool::aio_opcode::AIO_PREAD;
 	} else {
 		++os_n_file_writes;
+		slots = write_slots;
+		callback = write_io_callback;
+		opcode = tpool::aio_opcode::AIO_PWRITE;
 	}
 
 	compile_time_assert(sizeof(IORequest) <= tpool::MAX_AIO_USERDATA_LEN);
-	io_slots* slots= type.is_read() ? read_slots.get() : write_slots.get();
 	tpool::aiocb* cb = slots->acquire();
 
 	cb->m_buffer = buf;
-	cb->m_callback = (tpool::callback_func)io_callback;
+	cb->m_callback = callback;
 	cb->m_group = slots->get_task_group();
 	cb->m_fh = type.node->handle.m_file;
 	cb->m_len = (int)n;
 	cb->m_offset = offset;
-	cb->m_opcode = type.is_read() ? tpool::aio_opcode::AIO_PREAD : tpool::aio_opcode::AIO_PWRITE;
+	cb->m_opcode = opcode;
 	new (cb->m_userdata) IORequest{type};
 
 	if (srv_thread_pool->submit_io(cb)) {
@@ -3846,6 +3792,7 @@ func_exit:
 		os_file_handle_error(type.node->name, type.is_read()
 				     ? "aio read" : "aio write");
 		err = DB_IO_ERROR;
+		type.node->space->release();
 	}
 
 	goto func_exit;
@@ -4116,7 +4063,7 @@ void fil_node_t::find_metadata(os_file_t file
   }
   if (statbuf)
     block_size= statbuf->st_blksize;
-# ifdef UNIV_LINUX
+# ifdef __linux__
   on_ssd= statbuf && fil_system.is_ssd(statbuf->st_dev);
 # endif
 #endif
@@ -4165,10 +4112,10 @@ bool fil_node_t::read_page0()
   if (!deferred)
   {
     page_t *page= static_cast<byte*>(aligned_malloc(psize, psize));
-    if (os_file_read(IORequestRead, handle, page, 0, psize)
+    if (os_file_read(IORequestRead, handle, page, 0, psize, nullptr)
         != DB_SUCCESS)
     {
-      ib::error() << "Unable to read first page of file " << name;
+      sql_print_error("InnoDB: Unable to read first page of file %s", name);
 corrupted:
       aligned_free(page);
       return false;

@@ -58,6 +58,11 @@ select *,rownum() from t1,t2 order by t2.a desc, t1.a desc;
 select * from (select * from t1 order by a desc) as t where rownum() <= 2;
 select * from t1,t2 where t1.a=t2.a and rownum()<=2 order by t1.a,t2.a;
 
+create view v1 as
+select * from (select * from t1 order by a desc) as t where rownum() <= 2;
+select * from v1;
+drop view v1;
+
 --echo #
 --echo # Having
 --echo #
@@ -97,7 +102,10 @@ CREATE TABLE t3 (
   b varchar(1024) DEFAULT NULL
 );
 insert into t3 select mod(seq*3,20)+1, repeat(char(33+mod(seq,90)),mod(seq,10)*100) from seq_1_to_23;
+#chack after fix MDEV-28571
+--disable_view_protocol
 SELECT sq.a,length(sq.f) FROM (SELECT a, GROUP_CONCAT(b,b) AS f FROM t3 GROUP BY a ORDER BY a desc) as sq WHERE ROWNUM() <= 10;
+--enable_view_protocol
 drop table t3;
 
 --echo #
@@ -299,6 +307,7 @@ drop table t1;
 create table t1 (a int);
 insert into t1 select seq from seq_1_to_100;
 
+--disable_ps2_protocol
 flush status;
 select * from t1 where rownum() <= 3;
 show status like "Rows_read";
@@ -363,6 +372,7 @@ show status like "Rows_read";
 flush status;
 select * from t1 where rownum() < 10 limit 4;
 show status like "Rows_read";
+--enable_ps2_protocol
 
 drop table t1;
 
@@ -433,10 +443,13 @@ drop table t1;
 create table t1 (a int);
 insert into t1 values (1),(2),(3),(4),(5);
 
+--disable_view_protocol
 let $query=
 select * from (select a from t1 where a < 1000) as tt where rownum() <= 2;
 flush status;
+--disable_ps2_protocol
 eval $query;
+--enable_ps2_protocol
 show status like "Rows_read";
 eval explain extended $query;
 eval prepare stmt from "$query";
@@ -452,7 +465,9 @@ deallocate prepare stmt;
 let $query=
 select * from (select a from t1 where a < 1000 group by a) as tt where rownum() <= 2;
 flush status;
+--disable_ps2_protocol
 eval $query;
+--enable_ps2_protocol
 show status like "Rows_read";
 eval explain extended $query;
 eval prepare stmt from "$query";
@@ -463,7 +478,9 @@ deallocate prepare stmt;
 let $query=
 select * from (select a from t1 where a < 1000 group by a order by 1) as tt where rownum() <= 2;
 flush status;
+--disable_ps2_protocol
 eval $query;
+--enable_ps2_protocol
 show status like "Rows_read";
 eval explain extended $query;
 eval prepare stmt from "$query";
@@ -474,13 +491,16 @@ deallocate prepare stmt;
 let $query=
 select * from (select a from t1 where a < 1000 union select 10) as tt where rownum() <= 2;
 flush status;
+--disable_ps2_protocol
 eval $query;
+--enable_ps2_protocol
 show status like "Rows_read";
 eval explain extended $query;
 eval prepare stmt from "$query";
 execute stmt;
 execute stmt;
 deallocate prepare stmt;
+--enable_view_protocol
 
 --echo # Other limit
 
@@ -563,3 +583,40 @@ drop table t1;
 --echo # Table value constructors
 --echo #
 values ("first row"),("next row is 3"),(rownum()),("next row is 5"),(rownum());
+
+--echo #
+--echo # MDEV-31073: Server crash, assertion `table != 0 &&
+--echo # view->field_translation != 0' failure with ROWNUM and view
+--echo #
+
+CREATE TABLE t (f INT);
+INSERT INTO t VALUES (1),(2);
+CREATE VIEW v AS SELECT * FROM t;
+UPDATE v SET f = 10 WHERE ROWNUM() > 42 LIMIT 1;
+
+# Cleanup
+DROP VIEW v;
+DROP TABLE t;
+
+CREATE TABLE t (f INT);
+INSERT INTO t VALUES (1),(2);
+CREATE VIEW v AS SELECT f, 3 as e FROM t;
+UPDATE v SET f = 10 WHERE e > 42 LIMIT 1;
+
+# Cleanup
+DROP VIEW v;
+DROP TABLE t;
+
+CREATE TABLE t (f INT);
+INSERT INTO t VALUES (1),(2);
+CREATE VIEW v AS SELECT f, ROWNUM() as e FROM t;
+--error ER_NON_UPDATABLE_TABLE
+UPDATE v SET f = 10 WHERE e > 42 LIMIT 1;
+
+# Cleanup
+DROP VIEW v;
+DROP TABLE t;
+
+--echo #
+--echo # End of 10.6 tests
+--echo #

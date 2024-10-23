@@ -188,7 +188,7 @@ static MYSQL_SYSVAR_BOOL(page_checksum, maria_page_checksums, 0,
 
 /* It is only command line argument */
 static MYSQL_SYSVAR_CONST_STR(log_dir_path, maria_data_root,
-       PLUGIN_VAR_NOSYSVAR | PLUGIN_VAR_RQCMDARG | PLUGIN_VAR_READONLY,
+       PLUGIN_VAR_RQCMDARG | PLUGIN_VAR_READONLY,
        "Path to the directory where to store transactional log",
        NULL, NULL, mysql_real_data_home);
 
@@ -269,7 +269,7 @@ static MYSQL_THDVAR_ULONGLONG(sort_buffer_size, PLUGIN_VAR_RQCMDARG,
        "The buffer that is allocated when sorting the index when doing a "
        "REPAIR or when creating indexes with CREATE INDEX or ALTER TABLE.",
        NULL, NULL,
-       SORT_BUFFER_INIT, MIN_SORT_BUFFER, SIZE_T_MAX/2, 1);
+       SORT_BUFFER_INIT, MARIA_MIN_SORT_MEMORY, SIZE_T_MAX/16, 1);
 
 static MYSQL_THDVAR_ENUM(stats_method, PLUGIN_VAR_RQCMDARG,
        "Specifies how Aria index statistics collection code should treat "
@@ -292,7 +292,8 @@ static MYSQL_SYSVAR_BOOL(used_for_temp_tables,
        "Whether temporary tables should be MyISAM or Aria", 0, 0,
        1);
 
-static MYSQL_SYSVAR_BOOL(encrypt_tables, maria_encrypt_tables, PLUGIN_VAR_OPCMDARG,
+static MYSQL_SYSVAR_BOOL(encrypt_tables, maria_encrypt_tables,
+                         PLUGIN_VAR_OPCMDARG,
        "Encrypt tables (only for tables with ROW_FORMAT=PAGE (default) "
        "and not FIXED/DYNAMIC)",
        0, 0, 0);
@@ -872,7 +873,7 @@ extern "C" {
 
 int _ma_killed_ptr(HA_CHECK *param)
 {
-  if (likely(thd_killed((THD*)param->thd)) == 0)
+  if (!param->thd || likely(thd_killed((THD*)param->thd)) == 0)
     return 0;
   my_errno= HA_ERR_ABORTED_BY_USER;
   return 1;
@@ -901,9 +902,10 @@ int _ma_killed_ptr(HA_CHECK *param)
 void _ma_report_progress(HA_CHECK *param, ulonglong progress,
                          ulonglong max_progress)
 {
-  thd_progress_report((THD*)param->thd,
-                      progress + max_progress * param->stage,
-                      max_progress * param->max_stage);
+  if (param->thd)
+    thd_progress_report((THD*)param->thd,
+                        progress + max_progress * param->stage,
+                        max_progress * param->max_stage);
 }
 
 
@@ -1477,6 +1479,7 @@ int ha_maria::repair(THD * thd, HA_CHECK_OPT *check_opt)
   maria_chk_init(param);
   param->thd= thd;
   param->op_name= "repair";
+  file->error_count=0;
 
   /*
     The following can only be true if the table was marked as STATE_MOVED
@@ -1487,6 +1490,7 @@ int ha_maria::repair(THD * thd, HA_CHECK_OPT *check_opt)
   {
     param->db_name= table->s->db.str;
     param->table_name= table->alias.c_ptr();
+    param->testflag= check_opt->flags;
     _ma_check_print_info(param, "Running zerofill on moved table");
     return zerofill(thd, check_opt);
   }
@@ -2262,7 +2266,6 @@ void ha_maria::start_bulk_insert(ha_rows rows, uint flags)
       {
         bulk_insert_single_undo= BULK_INSERT_SINGLE_UNDO_AND_NO_REPAIR;
         write_log_record_for_bulk_insert(file);
-        _ma_tmp_disable_logging_for_table(file, TRUE);
         /*
           Pages currently in the page cache have type PAGECACHE_LSN_PAGE, we
           are not allowed to overwrite them with PAGECACHE_PLAIN_PAGE, so
@@ -2270,8 +2273,12 @@ void ha_maria::start_bulk_insert(ha_rows rows, uint flags)
           forced an UNDO which will for sure empty the table if we crash. The
           upcoming unique-key insertions however need a proper index, so we
           cannot leave the corrupted on-disk index file, thus we truncate it.
+
+          The following call will log the truncate and update the lsn for the table
+          to ensure that all redo's before this will be ignored.
         */
         maria_delete_all_rows(file);
+        _ma_tmp_disable_logging_for_table(file, TRUE);
       }
     }
     else if (!file->bulk_insert &&
@@ -2302,23 +2309,58 @@ void ha_maria::start_bulk_insert(ha_rows rows, uint flags)
 
 int ha_maria::end_bulk_insert()
 {
-  int first_error, error;
-  my_bool abort= file->s->deleting;
+  int first_error, first_errno= 0, error;
+  my_bool abort= file->s->deleting, empty_table= 0;
+  uint enable_index_mode= HA_KEY_SWITCH_NONUNIQ_SAVE;
   DBUG_ENTER("ha_maria::end_bulk_insert");
 
   if ((first_error= maria_end_bulk_insert(file, abort)))
-    abort= 1;
-
-  if ((error= maria_extra(file, HA_EXTRA_NO_CACHE, 0)))
   {
-    first_error= first_error ? first_error : error;
+    first_errno= my_errno;
     abort= 1;
   }
 
-  if (!abort && can_enable_indexes)
-    if ((error= enable_indexes(HA_KEY_SWITCH_NONUNIQ_SAVE)))
-      first_error= first_error ? first_error : error;
+  if ((error= maria_extra(file, HA_EXTRA_NO_CACHE, 0)))
+  {
+    if (!first_error)
+    {
+      first_error= error;
+      first_errno= my_errno;
+    }
+    abort= 1;
+  }
 
+  if (bulk_insert_single_undo != BULK_INSERT_NONE)
+  {
+    if (log_not_redoable_operation("BULK_INSERT"))
+    {
+      /* Got lock timeout. revert back to empty file and give error */
+      if (!first_error)
+      {
+        first_error= 1;
+        first_errno= my_errno;
+      }
+      enable_index_mode= HA_KEY_SWITCH_ALL;
+      empty_table= 1;
+      /*
+        Ignore all changed pages, required by _ma_renable_logging_for_table()
+      */
+      _ma_flush_table_files(file, MARIA_FLUSH_DATA|MARIA_FLUSH_INDEX,
+                            FLUSH_IGNORE_CHANGED, FLUSH_IGNORE_CHANGED);
+    }
+  }
+
+  if (!abort && can_enable_indexes)
+  {
+    if ((error= enable_indexes(enable_index_mode)))
+    {
+      if (!first_error)
+      {
+        first_error= 1;
+        first_errno= my_errno;
+      }
+    }
+  }
   if (bulk_insert_single_undo != BULK_INSERT_NONE)
   {
     /*
@@ -2327,12 +2369,23 @@ int ha_maria::end_bulk_insert()
     */
     if ((error= _ma_reenable_logging_for_table(file,
                                                bulk_insert_single_undo ==
-                                               BULK_INSERT_SINGLE_UNDO_AND_NO_REPAIR)))
-      first_error= first_error ? first_error : error;
-    bulk_insert_single_undo= BULK_INSERT_NONE;  // Safety
-    log_not_redoable_operation("BULK_INSERT");
+                                               BULK_INSERT_SINGLE_UNDO_AND_NO_REPAIR)) &&
+        !empty_table)
+    {
+      if (!first_error)
+      {
+        first_error= 1;
+        first_errno= my_errno;
+      }
+    }
+    bulk_insert_single_undo= BULK_INSERT_NONE;  // Safety if called again
   }
+  if (empty_table)
+    maria_delete_all_rows(file);
+
   can_enable_indexes= 0;
+  if (first_error)
+    my_errno= first_errno;
   DBUG_RETURN(first_error);
 }
 
@@ -2638,12 +2691,22 @@ int ha_maria::info(uint flag)
     share->db_record_offset= maria_info.record_offset;
     if (share->key_parts)
     {
-      ulong *to= table->key_info[0].rec_per_key, *end;
       double *from= maria_info.rec_per_key;
-      for (end= to+ share->key_parts ; to < end ; to++, from++)
-        *to= (ulong) (*from + 0.5);
+      KEY *key, *key_end;
+      for (key= table->key_info, key_end= key + share->keys;
+           key < key_end ; key++)
+      {
+        ulong *to= key->rec_per_key;
+        /* Some temporary tables does not allocate rec_per_key */
+        if (to)
+        {
+          for (ulong *end= to+ key->user_defined_key_parts ;
+               to < end ;
+               to++, from++)
+            *to= (ulong) (*from + 0.5);
+        }
+      }
     }
-
     /*
        Set data_file_name and index_file_name to point at the symlink value
        if table is symlinked (Ie;  Real name is not same as generated name)

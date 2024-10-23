@@ -1,5 +1,7 @@
 --source include/not_embedded.inc
 --source include/have_perfschema.inc
+# This test fails very frequently on a Windows builder.
+--source include/not_windows.inc
 
 UPDATE performance_schema.setup_instruments SET enabled = 'NO', timed = 'YES';
 
@@ -379,7 +381,9 @@ TRUNCATE TABLE performance_schema.events_waits_current;
 
 --connection con1
 
+--disable_ps2_protocol
 SELECT GET_LOCK('test', 0);
+--enable_ps2_protocol
 
 --connection default
 
@@ -394,7 +398,9 @@ execute dump_waits_history_long;
 
 --connection con2
 
+--disable_ps2_protocol
 --send SELECT GET_LOCK('test', 120);
+--enable_ps2_protocol
 
 --connection default
 
@@ -414,8 +420,9 @@ execute dump_waits_history_long;
 --horizontal_results
 
 --connection con1
-
+--disable_ps2_protocol
 SELECT RELEASE_LOCK('test');
+--enable_ps2_protocol
 
 --connection con2
 
@@ -433,8 +440,9 @@ execute dump_waits_history_long;
 --horizontal_results
 
 --connection con2
-
+--disable_ps2_protocol
 SELECT RELEASE_LOCK('test');
+--enable_ps2_protocol
 
 --connection default
 

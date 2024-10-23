@@ -46,7 +46,6 @@ Created July 18, 2007 Vasil Dimov
 #include "trx0i_s.h"
 #include "trx0trx.h"
 #include "srv0mon.h"
-#include "fut0fut.h"
 #include "pars0pars.h"
 #include "fts0types.h"
 #include "fts0opt.h"
@@ -58,6 +57,7 @@ Created July 18, 2007 Vasil Dimov
 #include "dict0crea.h"
 #include "fts0vlc.h"
 #include "scope.h"
+#include "log.h"
 
 /** The latest successfully looked up innodb_fts_aux_table */
 table_id_t innodb_ft_aux_table_id;
@@ -169,19 +169,37 @@ time_t			MYSQL_TYPE_DATETIME
 ---------------------------------
 */
 
-/*******************************************************************//**
+/**
 Common function to fill any of the dynamic tables:
 INFORMATION_SCHEMA.innodb_trx
 INFORMATION_SCHEMA.innodb_locks
 INFORMATION_SCHEMA.innodb_lock_waits
-@return 0 on success */
-static
-int
-trx_i_s_common_fill_table(
-/*======================*/
-	THD*		thd,	/*!< in: thread */
-	TABLE_LIST*	tables,	/*!< in/out: tables to fill */
-	Item*		);	/*!< in: condition (not used) */
+@retval false if access to the table is blocked
+@retval true  if something should be filled in */
+static bool trx_i_s_common_fill_table(THD *thd, TABLE_LIST *tables)
+{
+  DBUG_ENTER("trx_i_s_common_fill_table");
+
+  /* deny access to non-superusers */
+  if (check_global_access(thd, PROCESS_ACL))
+    DBUG_RETURN(false);
+
+  RETURN_IF_INNODB_NOT_STARTED(tables->schema_table_name.str);
+
+  /* update the cache */
+  trx_i_s_cache_start_write(trx_i_s_cache);
+  trx_i_s_possibly_fetch_data_into_cache(trx_i_s_cache);
+  trx_i_s_cache_end_write(trx_i_s_cache);
+
+  if (trx_i_s_cache_is_truncated(trx_i_s_cache))
+    sql_print_warning("InnoDB: Data in %.*s truncated due to memory limit"
+                      " of %u bytes",
+                      int(tables->schema_table_name.length),
+                      tables->schema_table_name.str,
+                      TRX_I_S_MEM_LIMIT);
+
+  DBUG_RETURN(true);
+}
 
 /*******************************************************************//**
 Unbind a dynamic INFORMATION_SCHEMA table.
@@ -344,26 +362,29 @@ static ST_FIELD_INFO innodb_trx_fields_info[]=
 /*******************************************************************//**
 Read data from cache buffer and fill the INFORMATION_SCHEMA.innodb_trx
 table with it.
-@return 0 on success */
-static
-int
-fill_innodb_trx_from_cache(
-/*=======================*/
-	trx_i_s_cache_t*	cache,	/*!< in: cache to read from */
-	THD*			thd,	/*!< in: used to call
-					schema_table_store_record() */
-	TABLE*			table)	/*!< in/out: fill this table */
+@retval 0 on success
+@retval 1 on failure */
+static int fill_innodb_trx_from_cache(THD *thd, TABLE_LIST *tables, Item*)
 {
-	Field**	fields;
 	ulint	rows_num;
 	char	lock_id[TRX_I_S_LOCK_ID_MAX_LEN + 1];
 	ulint	i;
 
 	DBUG_ENTER("fill_innodb_trx_from_cache");
 
-	fields = table->field;
+	if (!trx_i_s_common_fill_table(thd, tables)) {
+		DBUG_RETURN(0);
+	}
 
-	rows_num = trx_i_s_cache_get_rows_used(cache,
+	struct cache
+	{
+		cache() { trx_i_s_cache_start_read(trx_i_s_cache); }
+		~cache() { trx_i_s_cache_end_read(trx_i_s_cache); }
+	} c;
+
+	Field** fields = tables->table->field;
+
+	rows_num = trx_i_s_cache_get_rows_used(trx_i_s_cache,
 					       I_S_INNODB_TRX);
 
 	for (i = 0; i < rows_num; i++) {
@@ -372,7 +393,7 @@ fill_innodb_trx_from_cache(
 
 		row = (i_s_trx_row_t*)
 			trx_i_s_cache_get_nth_row(
-				cache, I_S_INNODB_TRX, i);
+				trx_i_s_cache, I_S_INNODB_TRX, i);
 
 		/* trx_id */
 		OK(fields[IDX_TRX_ID]->store(row->trx_id, true));
@@ -481,7 +502,7 @@ fill_innodb_trx_from_cache(
 		OK(fields[IDX_TRX_AUTOCOMMIT_NON_LOCKING]->store(
 			   row->trx_is_autocommit_non_locking, true));
 
-		OK(schema_table_store_record(thd, table));
+		OK(schema_table_store_record(thd, tables->table));
 	}
 
 	DBUG_RETURN(0);
@@ -503,7 +524,7 @@ innodb_trx_init(
 	schema = (ST_SCHEMA_TABLE*) p;
 
 	schema->fields_info = Show::innodb_trx_fields_info;
-	schema->fill_table = trx_i_s_common_fill_table;
+	schema->fill_table = fill_innodb_trx_from_cache;
 
 	DBUG_RETURN(0);
 }
@@ -630,20 +651,29 @@ static
 int
 fill_innodb_locks_from_cache(
 /*=========================*/
-	trx_i_s_cache_t*	cache,	/*!< in: cache to read from */
 	THD*			thd,	/*!< in: MySQL client connection */
-	TABLE*			table)	/*!< in/out: fill this table */
+	TABLE_LIST*		tables,	/*!< in/out: fill this table */
+	Item*)
 {
-	Field**	fields;
 	ulint	rows_num;
 	char	lock_id[TRX_I_S_LOCK_ID_MAX_LEN + 1];
 	ulint	i;
 
 	DBUG_ENTER("fill_innodb_locks_from_cache");
 
-	fields = table->field;
+	if (!trx_i_s_common_fill_table(thd, tables)) {
+		DBUG_RETURN(0);
+	}
 
-	rows_num = trx_i_s_cache_get_rows_used(cache,
+	struct cache
+	{
+		cache() { trx_i_s_cache_start_read(trx_i_s_cache); }
+		~cache() { trx_i_s_cache_end_read(trx_i_s_cache); }
+	} c;
+
+	Field** fields = tables->table->field;
+
+	rows_num = trx_i_s_cache_get_rows_used(trx_i_s_cache,
 					       I_S_INNODB_LOCKS);
 
 	for (i = 0; i < rows_num; i++) {
@@ -654,7 +684,7 @@ fill_innodb_locks_from_cache(
 
 		row = (i_s_locks_row_t*)
 			trx_i_s_cache_get_nth_row(
-				cache, I_S_INNODB_LOCKS, i);
+				trx_i_s_cache, I_S_INNODB_LOCKS, i);
 
 		/* lock_id */
 		trx_i_s_create_lock_id(row, lock_id, sizeof(lock_id));
@@ -701,7 +731,7 @@ fill_innodb_locks_from_cache(
 			fields[IDX_LOCK_DATA]->set_null();
 		}
 
-		OK(schema_table_store_record(thd, table));
+		OK(schema_table_store_record(thd, tables->table));
 	}
 
 	DBUG_RETURN(0);
@@ -723,7 +753,7 @@ innodb_locks_init(
 	schema = (ST_SCHEMA_TABLE*) p;
 
 	schema->fields_info = Show::innodb_locks_fields_info;
-	schema->fill_table = trx_i_s_common_fill_table;
+	schema->fill_table = fill_innodb_locks_from_cache;
 
 	DBUG_RETURN(0);
 }
@@ -805,12 +835,11 @@ static
 int
 fill_innodb_lock_waits_from_cache(
 /*==============================*/
-	trx_i_s_cache_t*	cache,	/*!< in: cache to read from */
 	THD*			thd,	/*!< in: used to call
 					schema_table_store_record() */
-	TABLE*			table)	/*!< in/out: fill this table */
+	TABLE_LIST*		tables,	/*!< in/out: fill this table */
+	Item*)
 {
-	Field**	fields;
 	ulint	rows_num;
 	char	requested_lock_id[TRX_I_S_LOCK_ID_MAX_LEN + 1];
 	char	blocking_lock_id[TRX_I_S_LOCK_ID_MAX_LEN + 1];
@@ -818,9 +847,19 @@ fill_innodb_lock_waits_from_cache(
 
 	DBUG_ENTER("fill_innodb_lock_waits_from_cache");
 
-	fields = table->field;
+	if (!trx_i_s_common_fill_table(thd, tables)) {
+		DBUG_RETURN(0);
+	}
 
-	rows_num = trx_i_s_cache_get_rows_used(cache,
+	struct cache
+	{
+		cache() { trx_i_s_cache_start_read(trx_i_s_cache); }
+		~cache() { trx_i_s_cache_end_read(trx_i_s_cache); }
+	} c;
+
+	Field** fields = tables->table->field;
+
+	rows_num = trx_i_s_cache_get_rows_used(trx_i_s_cache,
 					       I_S_INNODB_LOCK_WAITS);
 
 	for (i = 0; i < rows_num; i++) {
@@ -829,7 +868,7 @@ fill_innodb_lock_waits_from_cache(
 
 		row = (i_s_lock_waits_row_t*)
 			trx_i_s_cache_get_nth_row(
-				cache, I_S_INNODB_LOCK_WAITS, i);
+				trx_i_s_cache, I_S_INNODB_LOCK_WAITS, i);
 
 		/* requesting_trx_id */
 		OK(fields[IDX_REQUESTING_TRX_ID]->store(
@@ -855,7 +894,7 @@ fill_innodb_lock_waits_from_cache(
 				   blocking_lock_id,
 				   sizeof(blocking_lock_id))));
 
-		OK(schema_table_store_record(thd, table));
+		OK(schema_table_store_record(thd, tables->table));
 	}
 
 	DBUG_RETURN(0);
@@ -877,7 +916,7 @@ innodb_lock_waits_init(
 	schema = (ST_SCHEMA_TABLE*) p;
 
 	schema->fields_info = Show::innodb_lock_waits_fields_info;
-	schema->fill_table = trx_i_s_common_fill_table;
+	schema->fill_table = fill_innodb_lock_waits_from_cache;
 
 	DBUG_RETURN(0);
 }
@@ -930,105 +969,6 @@ struct st_maria_plugin	i_s_innodb_lock_waits =
 	INNODB_VERSION_STR,
         MariaDB_PLUGIN_MATURITY_STABLE,
 };
-
-/*******************************************************************//**
-Common function to fill any of the dynamic tables:
-INFORMATION_SCHEMA.innodb_trx
-INFORMATION_SCHEMA.innodb_locks
-INFORMATION_SCHEMA.innodb_lock_waits
-@return 0 on success */
-static
-int
-trx_i_s_common_fill_table(
-/*======================*/
-	THD*		thd,	/*!< in: thread */
-	TABLE_LIST*	tables,	/*!< in/out: tables to fill */
-	Item*		)	/*!< in: condition (not used) */
-{
-	LEX_CSTRING		table_name;
-	int			ret;
-	trx_i_s_cache_t*	cache;
-
-	DBUG_ENTER("trx_i_s_common_fill_table");
-
-	/* deny access to non-superusers */
-	if (check_global_access(thd, PROCESS_ACL)) {
-
-		DBUG_RETURN(0);
-	}
-
-	/* minimize the number of places where global variables are
-	referenced */
-	cache = trx_i_s_cache;
-
-	/* which table we have to fill? */
-	table_name = tables->schema_table_name;
-	/* or table_name = tables->schema_table->table_name; */
-
-	RETURN_IF_INNODB_NOT_STARTED(table_name.str);
-
-	/* update the cache */
-	trx_i_s_cache_start_write(cache);
-	trx_i_s_possibly_fetch_data_into_cache(cache);
-	trx_i_s_cache_end_write(cache);
-
-	if (trx_i_s_cache_is_truncated(cache)) {
-
-		ib::warn() << "Data in " << table_name.str << " truncated due to"
-			" memory limit of " << TRX_I_S_MEM_LIMIT << " bytes";
-	}
-
-	ret = 0;
-
-	trx_i_s_cache_start_read(cache);
-
-	if (innobase_strcasecmp(table_name.str, "innodb_trx") == 0) {
-
-		if (fill_innodb_trx_from_cache(
-			cache, thd, tables->table) != 0) {
-
-			ret = 1;
-		}
-
-	} else if (innobase_strcasecmp(table_name.str, "innodb_locks") == 0) {
-
-		if (fill_innodb_locks_from_cache(
-			cache, thd, tables->table) != 0) {
-
-			ret = 1;
-		}
-
-	} else if (innobase_strcasecmp(table_name.str, "innodb_lock_waits") == 0) {
-
-		if (fill_innodb_lock_waits_from_cache(
-			cache, thd, tables->table) != 0) {
-
-			ret = 1;
-		}
-
-	} else {
-		ib::error() << "trx_i_s_common_fill_table() was"
-			" called to fill unknown table: " << table_name.str << "."
-			" This function only knows how to fill"
-			" innodb_trx, innodb_locks and"
-			" innodb_lock_waits tables.";
-
-		ret = 1;
-	}
-
-	trx_i_s_cache_end_read(cache);
-
-#if 0
-	DBUG_RETURN(ret);
-#else
-	/* if this function returns something else than 0 then a
-	deadlock occurs between the mysqld server and mysql client,
-	see http://bugs.mysql.com/29900 ; when that bug is resolved
-	we can enable the DBUG_RETURN(ret) above */
-	ret++;  // silence a gcc46 warning
-	DBUG_RETURN(0);
-#endif
-}
 
 namespace Show {
 /* Fields of the dynamic table information_schema.innodb_cmp. */
@@ -1346,9 +1286,8 @@ i_s_cmp_per_index_fill_low(
 
 	for (iter = snap.begin(), i = 0; iter != snap.end(); iter++, i++) {
 
-		dict_index_t*	index = dict_index_find_on_id_low(iter->first);
-
-		if (index != NULL) {
+		if (dict_index_t* index
+		    = dict_index_get_if_in_cache_low(iter->first)) {
 			char	db_utf8[MAX_DB_UTF8_LEN];
 			char	table_utf8[MAX_TABLE_UTF8_LEN];
 
@@ -4127,7 +4066,7 @@ i_s_innodb_buffer_page_get_info(
 
 	page_info->state = bpage->state();
 
-	if (page_info->state < buf_page_t::FREED) {
+	if (page_info->state < buf_page_t::UNFIXED) {
 		page_info->page_type = I_S_PAGE_TYPE_UNKNOWN;
 		page_info->compressed_only = false;
 	} else {
@@ -4833,7 +4772,7 @@ static const char *i_s_sys_tables_rec(const btr_pcur_t &pcur, mtr_t *mtr,
   }
 
   if (rec)
-    return dict_load_table_low(mtr, rec, table);
+    return dict_load_table_low(mtr, false, rec, table);
 
   *table= dict_sys.load_table
     (span<const char>{reinterpret_cast<const char*>(pcur.old_rec), len});
@@ -5012,71 +4951,61 @@ static ST_FIELD_INFO innodb_sys_tablestats_fields_info[]=
 };
 } // namespace Show
 
-/** Populate information_schema.innodb_sys_tablestats table with information
-from SYS_TABLES.
-@param[in]	thd		thread ID
-@param[in,out]	table		table
-@param[in]	ref_count	table reference count
-@param[in,out]	table_to_fill	fill this table
+/** Populate information_schema.innodb_sys_tablestats table with a table,
+and release exclusive dict_sys.latch.
+@param[in]	thd		connection
+@param[in,out]	table		InnoDB table metadata
+@param[in,out]	table_to_fill	INFORMATION_SCHEMA.INNODB_SYS_TABLESTATS
 @return 0 on success */
 static
 int
-i_s_dict_fill_sys_tablestats(
-	THD*		thd,
-	dict_table_t*	table,
-	ulint		ref_count,
-	TABLE*		table_to_fill)
+i_s_dict_fill_sys_tablestats(THD* thd, dict_table_t *table,
+                             TABLE* table_to_fill)
 {
-	Field**		fields;
+  DBUG_ENTER("i_s_dict_fill_sys_tablestats");
 
-	DBUG_ENTER("i_s_dict_fill_sys_tablestats");
+  Field **fields= table_to_fill->field;
 
-	fields = table_to_fill->field;
+  {
+    table->stats_mutex_lock();
+    auto _ = make_scope_exit([table]() {
+      table->stats_mutex_unlock(); dict_sys.unlock(); });
 
-	OK(fields[SYS_TABLESTATS_ID]->store(longlong(table->id), TRUE));
+    OK(fields[SYS_TABLESTATS_ID]->store(longlong(table->id), TRUE));
 
-	OK(field_store_string(fields[SYS_TABLESTATS_NAME],
-			      table->name.m_name));
+    OK(field_store_string(fields[SYS_TABLESTATS_NAME],
+                          table->name.m_name));
+    OK(fields[SYS_TABLESTATS_INIT]->store(table->stat_initialized, true));
 
-	{
-		table->stats_mutex_lock();
-		auto _ = make_scope_exit([table]() {
-			table->stats_mutex_unlock(); });
+    if (table->stat_initialized)
+    {
+      OK(fields[SYS_TABLESTATS_NROW]->store(table->stat_n_rows, true));
 
-		OK(fields[SYS_TABLESTATS_INIT]->store(table->stat_initialized,
-						      true));
+      OK(fields[SYS_TABLESTATS_CLUST_SIZE]->
+         store(table->stat_clustered_index_size, true));
 
-		if (table->stat_initialized) {
-			OK(fields[SYS_TABLESTATS_NROW]->store(
-				   table->stat_n_rows, true));
+      OK(fields[SYS_TABLESTATS_INDEX_SIZE]->
+         store(table->stat_sum_of_other_index_sizes, true));
 
-			OK(fields[SYS_TABLESTATS_CLUST_SIZE]->store(
-				   table->stat_clustered_index_size, true));
+      OK(fields[SYS_TABLESTATS_MODIFIED]->
+         store(table->stat_modified_counter, true));
+    }
+    else
+    {
+      OK(fields[SYS_TABLESTATS_NROW]->store(0, true));
+      OK(fields[SYS_TABLESTATS_CLUST_SIZE]->store(0, true));
+      OK(fields[SYS_TABLESTATS_INDEX_SIZE]->store(0, true));
+      OK(fields[SYS_TABLESTATS_MODIFIED]->store(0, true));
+    }
 
-			OK(fields[SYS_TABLESTATS_INDEX_SIZE]->store(
-				   table->stat_sum_of_other_index_sizes,
-				   true));
+    OK(fields[SYS_TABLESTATS_AUTONINC]->store(table->autoinc, true));
 
-			OK(fields[SYS_TABLESTATS_MODIFIED]->store(
-				   table->stat_modified_counter, true));
-		} else {
-			OK(fields[SYS_TABLESTATS_NROW]->store(0, true));
+    OK(fields[SYS_TABLESTATS_TABLE_REF_COUNT]->
+       store(table->get_ref_count(), true));
+  }
 
-			OK(fields[SYS_TABLESTATS_CLUST_SIZE]->store(0, true));
-
-			OK(fields[SYS_TABLESTATS_INDEX_SIZE]->store(0, true));
-
-			OK(fields[SYS_TABLESTATS_MODIFIED]->store(0, true));
-		}
-	}
-
-	OK(fields[SYS_TABLESTATS_AUTONINC]->store(table->autoinc, true));
-
-	OK(fields[SYS_TABLESTATS_TABLE_REF_COUNT]->store(ref_count, true));
-
-	OK(schema_table_store_record(thd, table_to_fill));
-
-	DBUG_RETURN(0);
+  OK(schema_table_store_record(thd, table_to_fill));
+  DBUG_RETURN(0);
 }
 
 /*******************************************************************//**
@@ -5111,23 +5040,17 @@ i_s_sys_tables_fill_table_stats(
 
 	while (rec) {
 		const char*	err_msg;
-		dict_table_t*	table_rec= 0;
+		dict_table_t*	table_rec = nullptr;
 
 		mtr.commit();
 		/* Fetch the dict_table_t structure corresponding to
 		this SYS_TABLES record */
 		err_msg = i_s_sys_tables_rec(pcur, nullptr, nullptr,
-                                             &table_rec);
+					     &table_rec);
 
 		if (UNIV_LIKELY(!err_msg)) {
-			bool evictable = dict_sys.prevent_eviction(table_rec);
-			ulint ref_count = table_rec->get_ref_count();
-			dict_sys.unlock();
-			i_s_dict_fill_sys_tablestats(thd, table_rec, ref_count,
+			i_s_dict_fill_sys_tablestats(thd, table_rec,
 						     tables->table);
-			if (!evictable) {
-				table_rec = nullptr;
-			}
 		} else {
 			ut_ad(!table_rec);
 			dict_sys.unlock();
@@ -5139,9 +5062,6 @@ i_s_sys_tables_fill_table_stats(
 		/* Get the next record */
 		mtr.start();
 		dict_sys.lock(SRW_LOCK_CALL);
-		if (table_rec) {
-			dict_sys.allow_eviction(table_rec);
-		}
 
 		rec = dict_getnext_system(&pcur, &mtr);
 	}
@@ -5243,10 +5163,10 @@ static ST_FIELD_INFO innodb_sysindex_fields_info[]=
   Column("N_FIELDS", SLong(), NOT_NULL),
 
 #define SYS_INDEX_PAGE_NO	5
-  Column("PAGE_NO", SLong(), NOT_NULL),
+  Column("PAGE_NO", SLong(), NULLABLE),
 
 #define SYS_INDEX_SPACE		6
-  Column("SPACE", SLong(), NOT_NULL),
+  Column("SPACE", SLong(), NULLABLE),
 
 #define SYS_INDEX_MERGE_THRESHOLD 7
   Column("MERGE_THRESHOLD", SLong(), NOT_NULL),
@@ -5298,12 +5218,14 @@ i_s_dict_fill_sys_indexes(
 	if (index->page == FIL_NULL) {
 		fields[SYS_INDEX_PAGE_NO]->set_null();
 	} else {
+		fields[SYS_INDEX_PAGE_NO]->set_notnull();
 		OK(fields[SYS_INDEX_PAGE_NO]->store(index->page, true));
 	}
 
-	if (space_id == ULINT_UNDEFINED) {
+	if (space_id == FIL_NULL) {
 		fields[SYS_INDEX_SPACE]->set_null();
 	} else {
+		fields[SYS_INDEX_SPACE]->set_notnull();
 		OK(fields[SYS_INDEX_SPACE]->store(space_id, true));
 	}
 
@@ -6516,8 +6438,13 @@ static int i_s_sys_tablespaces_fill(THD *thd, const fil_space_t &s, TABLE *t)
       OK(f->store(name.data(), name.size(), system_charset_info));
       f->set_notnull();
     }
-    else
-      f->set_notnull();
+    else if (srv_is_undo_tablespace(s.id))
+    {
+      char name[15];
+      snprintf(name, sizeof name, "innodb_undo%03u",
+               (s.id - srv_undo_space_id_start + 1));
+      OK(f->store(name, strlen(name), system_charset_info));
+    } else f->set_notnull();
   }
 
   fields[SYS_TABLESPACES_NAME]->set_null();
@@ -6571,7 +6498,9 @@ static int i_s_sys_tablespaces_fill_table(THD *thd, TABLE_LIST *tables, Item*)
     {
       space.reacquire();
       mysql_mutex_unlock(&fil_system.mutex);
+      space.s_lock();
       err= i_s_sys_tablespaces_fill(thd, space, tables->table);
+      space.s_unlock();
       mysql_mutex_lock(&fil_system.mutex);
       space.release();
       if (err)
@@ -6581,6 +6510,8 @@ static int i_s_sys_tablespaces_fill_table(THD *thd, TABLE_LIST *tables, Item*)
 
   fil_system.freeze_space_list--;
   mysql_mutex_unlock(&fil_system.mutex);
+  if (err == DB_SUCCESS)
+    err= i_s_sys_tablespaces_fill(thd, *fil_system.temp_space, tables->table);
   DBUG_RETURN(err);
 }
 
@@ -6708,7 +6639,6 @@ i_s_dict_fill_tablespaces_encryption(
 {
 	Field**	fields;
 	struct fil_space_crypt_status_t status;
-
 	DBUG_ENTER("i_s_dict_fill_tablespaces_encryption");
 
 	fields = table_to_fill->field;
@@ -6728,6 +6658,14 @@ i_s_dict_fill_tablespaces_encryption(
 		if (name.data()) {
 			OK(fields[TABLESPACES_ENCRYPTION_NAME]->store(
 				   name.data(), name.size(),
+				   system_charset_info));
+			fields[TABLESPACES_ENCRYPTION_NAME]->set_notnull();
+		} else if (srv_is_undo_tablespace(space->id)) {
+			char undo_name[sizeof "innodb_undo000"];
+			snprintf(undo_name, sizeof undo_name,
+				 "innodb_undo%03" PRIu32, space->id);
+			OK(fields[TABLESPACES_ENCRYPTION_NAME]->store(
+				   undo_name, strlen(undo_name),
 				   system_charset_info));
 			fields[TABLESPACES_ENCRYPTION_NAME]->set_notnull();
 		} else {
@@ -6797,8 +6735,10 @@ i_s_tablespaces_encryption_fill_table(
 		    && !space.is_stopping()) {
 			space.reacquire();
 			mysql_mutex_unlock(&fil_system.mutex);
+			space.s_lock();
 			err = i_s_dict_fill_tablespaces_encryption(
 				thd, &space, tables->table);
+			space.s_unlock();
 			mysql_mutex_lock(&fil_system.mutex);
 			space.release();
 			if (err) {

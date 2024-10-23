@@ -1,4 +1,4 @@
-/* Copyright (c) 2016, 2021, MariaDB Corporation.
+/* Copyright (c) 2016, 2022, MariaDB Corporation.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -18,7 +18,22 @@
 #include "sql_priv.h"
 #include "sql_class.h"
 #include "item.h"
+#include "sql_parse.h" // For check_stack_overrun
 
+/*
+  Allocating memory and *also* using it (reading and
+  writing from it) because some build instructions cause
+  compiler to optimize out stack_used_up. Since alloca()
+  here depends on stack_used_up, it doesnt get executed
+  correctly and causes json_debug_nonembedded to fail
+  ( --error ER_STACK_OVERRUN_NEED_MORE does not occur).
+*/
+#define ALLOCATE_MEM_ON_STACK(A) do \
+                              { \
+                                uchar *array= (uchar*)alloca(A); \
+                                bzero(array, A); \
+                                my_checksum(0, array, A); \
+                              } while(0)
 
 /*
   Compare ASCII string against the string with the specified
@@ -128,6 +143,140 @@ static int append_tab(String *js, int depth, int tab_size)
   return 0;
 }
 
+int json_path_parts_compare(
+    const json_path_step_t *a, const json_path_step_t *a_end,
+    const json_path_step_t *b, const json_path_step_t *b_end,
+    enum json_value_types vt, const int *array_sizes)
+{
+  int res, res2;
+  const json_path_step_t *temp_b= b;
+
+  DBUG_EXECUTE_IF("json_check_min_stack_requirement",
+                  {
+                    long arbitrary_var;
+                    long stack_used_up= (available_stack_size(current_thd->thread_stack, &arbitrary_var));
+                    ALLOCATE_MEM_ON_STACK(my_thread_stack_size-stack_used_up-STACK_MIN_SIZE);
+                  });
+  if (check_stack_overrun(current_thd, STACK_MIN_SIZE , NULL))
+    return 1;
+
+  while (a <= a_end)
+  {
+    if (b > b_end)
+    {
+      while (vt != JSON_VALUE_ARRAY &&
+             (a->type & JSON_PATH_ARRAY_WILD) == JSON_PATH_ARRAY &&
+             a->n_item == 0)
+      {
+        if (++a > a_end)
+          return 0;
+      }
+      return -2;
+    }
+
+    DBUG_ASSERT((b->type & (JSON_PATH_WILD | JSON_PATH_DOUBLE_WILD)) == 0);
+
+    if (a->type & JSON_PATH_ARRAY)
+    {
+      if (b->type & JSON_PATH_ARRAY)
+      {
+        int res= 0, corrected_n_item_a= 0;
+        if (array_sizes)
+          corrected_n_item_a= a->n_item < 0 ?
+                                array_sizes[b-temp_b] + a->n_item : a->n_item;
+        if (a->type & JSON_PATH_ARRAY_RANGE)
+        {
+          int corrected_n_item_end_a= 0;
+          if (array_sizes)
+            corrected_n_item_end_a= a->n_item_end < 0 ?
+                                    array_sizes[b-temp_b] + a->n_item_end :
+                                    a->n_item_end;
+          res= b->n_item >= corrected_n_item_a &&
+                b->n_item <= corrected_n_item_end_a;
+        }
+        else
+         res= corrected_n_item_a == b->n_item;
+
+        if ((a->type & JSON_PATH_WILD) || res)
+          goto step_fits;
+        goto step_failed;
+      }
+      if ((a->type & JSON_PATH_WILD) == 0 && a->n_item == 0)
+        goto step_fits_autowrap;
+      goto step_failed;
+    }
+    else /* JSON_PATH_KEY */
+    {
+      if (!(b->type & JSON_PATH_KEY))
+        goto step_failed;
+
+      if (!(a->type & JSON_PATH_WILD) &&
+          (a->key_end - a->key != b->key_end - b->key ||
+           memcmp(a->key, b->key, a->key_end - a->key) != 0))
+        goto step_failed;
+
+      goto step_fits;
+    }
+step_failed:
+    if (!(a->type & JSON_PATH_DOUBLE_WILD))
+      return -1;
+    b++;
+    continue;
+
+step_fits:
+    b++;
+    if (!(a->type & JSON_PATH_DOUBLE_WILD))
+    {
+      a++;
+      continue;
+    }
+
+    /* Double wild handling needs recursions. */
+    res= json_path_parts_compare(a+1, a_end, b, b_end, vt,
+                                 array_sizes ? array_sizes + (b - temp_b) :
+                                               NULL);
+    if (res == 0)
+      return 0;
+
+    res2= json_path_parts_compare(a, a_end, b, b_end, vt,
+                                  array_sizes ? array_sizes + (b - temp_b) :
+                                                NULL);
+
+    return (res2 >= 0) ? res2 : res;
+
+step_fits_autowrap:
+    if (!(a->type & JSON_PATH_DOUBLE_WILD))
+    {
+      a++;
+      continue;
+    }
+
+    /* Double wild handling needs recursions. */
+    res= json_path_parts_compare(a+1, a_end, b+1, b_end, vt,
+                                 array_sizes ? array_sizes + (b - temp_b) :
+                                               NULL);
+    if (res == 0)
+      return 0;
+
+    res2= json_path_parts_compare(a, a_end, b+1, b_end, vt,
+                                  array_sizes ? array_sizes + (b - temp_b) :
+                                                NULL);
+
+    return (res2 >= 0) ? res2 : res;
+
+  }
+
+  return b <= b_end;
+}
+
+
+int json_path_compare(const json_path_t *a, const json_path_t *b,
+                      enum json_value_types vt, const int *array_size)
+{
+  return json_path_parts_compare(a->steps+1, a->last_step,
+                                 b->steps+1, b->last_step, vt, array_size);
+}
+
 
 static int json_nice(json_engine_t *je, String *nice_js,
                      Item_func_json_format::formats mode, int tab_size=4)
@@ -136,6 +285,10 @@ static int json_nice(json_engine_t *je, String *nice_js,
   static const char *comma= ", ", *colon= "\": ";
   uint comma_len, colon_len;
   int first_value= 1;
+  int value_size = 0;
+  int curr_state= -1;
+  int64_t value_len= 0;
+  String curr_str{};
 
   nice_js->length(0);
   nice_js->set_charset(je->s.cs);
@@ -162,6 +315,7 @@ static int json_nice(json_engine_t *je, String *nice_js,
 
   do
   {
+    curr_state= je->state;
     switch (je->state)
     {
     case JST_KEY:
@@ -209,17 +363,23 @@ handle_value:
         if (append_simple(nice_js, je->value_begin,
                           je->value_end - je->value_begin))
           goto error;
-
+        
+        curr_str.copy((const char *)je->value_begin,
+                      je->value_end - je->value_begin, je->s.cs);
+        value_len= je->value_end - je->value_begin;
         first_value= 0;
+        if (value_size != -1)
+          value_size++;
       }
       else
       {
         if (mode == Item_func_json_format::DETAILED &&
-            depth > 0 &&
+            depth > 0 && !(curr_state != JST_KEY) &&
             append_tab(nice_js, depth, tab_size))
           goto error;
         nice_js->append((je->value_type == JSON_VALUE_OBJECT) ? "{" : "[", 1);
         first_value= 1;
+        value_size= (je->value_type == JSON_VALUE_OBJECT) ? -1: 0;
         depth++;
       }
 
@@ -228,11 +388,27 @@ handle_value:
     case JST_OBJ_END:
     case JST_ARRAY_END:
       depth--;
-      if (mode == Item_func_json_format::DETAILED &&
+      if (mode == Item_func_json_format::DETAILED && (value_size > 1 || value_size == -1) &&
           append_tab(nice_js, depth, tab_size))
         goto error;
+        
+      if (mode == Item_func_json_format::DETAILED && 
+          value_size == 1 && je->state != JST_OBJ_END)
+      {
+        for (auto i = 0; i < value_len; i++)
+        {
+          nice_js->chop();
+        }
+        for (auto i = 0; i < (depth + 1) * tab_size + 1; i++)
+        {
+          nice_js->chop();
+        }
+        nice_js->append(curr_str);
+      }
+      
       nice_js->append((je->state == JST_OBJ_END) ? "}": "]", 1);
       first_value= 0;
+      value_size= -1;
       break;
 
     default:
@@ -528,10 +704,6 @@ bool Item_func_json_query::fix_length_and_dec(THD *thd)
 }
 
 
-/*
-  Returns NULL, not an error if the found value
-  is not a scalar.
-*/
 bool Json_path_extractor::extract(String *str, Item *item_js, Item *item_jp,
                                   CHARSET_INFO *cs)
 {
@@ -562,6 +734,9 @@ continue_search:
     return true;
 
   if (json_read_value(&je))
+    return true;
+
+  if (je.value_type == JSON_VALUE_NULL)
     return true;
 
   if (unlikely(check_and_get_value(&je, str, &error)))
@@ -846,16 +1021,19 @@ String *Item_func_json_extract::read_json(String *str,
     json_path_with_flags *c_path= paths + n_arg - 1;
     if (!c_path->parsed)
     {
+      c_path->p.types_used= JSON_PATH_KEY_NULL;
       String *s_p= args[n_arg]->val_str(tmp_paths + (n_arg-1));
-      if (s_p &&
-          json_path_setup(&c_path->p,s_p->charset(),(const uchar *) s_p->ptr(),
-                          (const uchar *) s_p->ptr() + s_p->length()))
+      if (s_p)
       {
-        report_path_error(s_p, &c_path->p, n_arg);
-        goto return_null;
+       if (json_path_setup(&c_path->p,s_p->charset(),(const uchar *) s_p->ptr(),
+                          (const uchar *) s_p->ptr() + s_p->length()))
+       {
+         report_path_error(s_p, &c_path->p, n_arg);
+         goto return_null;
+       }
+       c_path->parsed= c_path->constant;
+       has_negative_path|= c_path->p.types_used & JSON_PATH_NEGATIVE_INDEX;
       }
-      c_path->parsed= c_path->constant;
-      has_negative_path|= c_path->p.types_used & JSON_PATH_NEGATIVE_INDEX;
     }
 
     if (args[n_arg]->null_value)
@@ -926,7 +1104,7 @@ String *Item_func_json_extract::read_json(String *str,
     if (!possible_multiple_values)
     {
       /* Loop to the end of the JSON just to make sure it's valid. */
-      while (json_get_path_next(&je, &p) == 0) {}
+      while (json_scan_next(&je) == 0) {}
       break;
     }
   }
@@ -1056,13 +1234,14 @@ my_decimal *Item_func_json_extract::val_decimal(my_decimal *to)
       case JSON_VALUE_OBJECT:
       case JSON_VALUE_ARRAY:
       case JSON_VALUE_FALSE:
-      case JSON_VALUE_NULL:
       case JSON_VALUE_UNINITIALIZED:
-      break;
+      case JSON_VALUE_NULL:
+        int2my_decimal(E_DEC_FATAL_ERROR, 0, false/*unsigned_flag*/, to);
+        return to;
     };
   }
-  int2my_decimal(E_DEC_FATAL_ERROR, 0, false/*unsigned_flag*/, to);
-  return to;
+  DBUG_ASSERT(null_value);
+  return 0;
 }
 
 
@@ -1100,6 +1279,14 @@ static int check_contains(json_engine_t *js, json_engine_t *value)
 {
   json_engine_t loc_js;
   bool set_js;
+  DBUG_EXECUTE_IF("json_check_min_stack_requirement",
+                  {
+                    long arbitrary_var;
+                    long stack_used_up= (available_stack_size(current_thd->thread_stack, &arbitrary_var));
+                    ALLOCATE_MEM_ON_STACK(my_thread_stack_size-stack_used_up-STACK_MIN_SIZE);
+                  });
+  if (check_stack_overrun(current_thd, STACK_MIN_SIZE , NULL))
+    return 1;
 
   switch (js->value_type)
   {
@@ -1391,15 +1578,18 @@ longlong Item_func_json_contains_path::val_int()
     json_path_with_flags *c_path= paths + n_arg - 2;
     if (!c_path->parsed)
     {
-      String *s_p= args[n_arg]->val_str(tmp_paths+(n_arg-2));
-      if (s_p &&
-          json_path_setup(&c_path->p,s_p->charset(),(const uchar *) s_p->ptr(),
-                          (const uchar *) s_p->ptr() + s_p->length()))
+      String *s_p= args[n_arg]->val_str(tmp_paths + (n_arg-2));
+      if (s_p)
       {
-        report_path_error(s_p, &c_path->p, n_arg-2);
-        goto return_null;
+       if (json_path_setup(&c_path->p,s_p->charset(),(const uchar *) s_p->ptr(),
+                          (const uchar *) s_p->ptr() + s_p->length()))
+       {
+         report_path_error(s_p, &c_path->p, n_arg);
+         goto null_return;
+       }
+       c_path->parsed= c_path->constant;
+       has_negative_path|= c_path->p.types_used & JSON_PATH_NEGATIVE_INDEX;
       }
-      c_path->parsed= c_path->constant;
     }
 
     if (args[n_arg]->null_value)
@@ -1460,18 +1650,21 @@ longlong Item_func_json_contains_path::val_int()
   for (n_arg=2; n_arg < arg_count; n_arg++)
   {
     json_path_with_flags *c_path= paths + n_arg - 2;
+    c_path->p.types_used= JSON_PATH_KEY_NULL;
     if (!c_path->parsed)
     {
       String *s_p= args[n_arg]->val_str(tmp_paths + (n_arg-2));
-      if (s_p &&
-          json_path_setup(&c_path->p,s_p->charset(),(const uchar *) s_p->ptr(),
-                          (const uchar *) s_p->ptr() + s_p->length()))
+      if (s_p)
       {
-        report_path_error(s_p, &c_path->p, n_arg);
-        goto null_return;
+       if (json_path_setup(&c_path->p,s_p->charset(),(const uchar *) s_p->ptr(),
+                          (const uchar *) s_p->ptr() + s_p->length()))
+       {
+         report_path_error(s_p, &c_path->p, n_arg);
+         goto null_return;
+       }
+       c_path->parsed= c_path->constant;
+       has_negative_path|= c_path->p.types_used & JSON_PATH_NEGATIVE_INDEX;
       }
-      c_path->parsed= c_path->constant;
-      has_negative_path|= c_path->p.types_used & JSON_PATH_NEGATIVE_INDEX;
     }
     if (args[n_arg]->null_value)
       goto null_return;
@@ -1551,7 +1744,7 @@ bool is_json_type(const Item *item)
     if (Type_handler_json_common::is_json_type_handler(item->type_handler()))
       return true;
     const Item_func_conv_charset *func;
-    if (!(func= dynamic_cast<const Item_func_conv_charset*>(item)))
+    if (!(func= dynamic_cast<const Item_func_conv_charset*>(item->real_item())))
       return false;
     item= func->arguments()[0];
   }
@@ -1686,7 +1879,7 @@ bool Item_func_json_array::fix_length_and_dec(THD *thd)
     return TRUE;
 
   for (n_arg=0 ; n_arg < arg_count ; n_arg++)
-    char_length+= args[n_arg]->max_char_length() + 4;
+    char_length+= static_cast<ulonglong>(args[n_arg]->max_char_length()) + 4;
 
   fix_char_length_ulonglong(char_length);
   tmp_val.set_charset(collation.collation);
@@ -1745,7 +1938,8 @@ bool Item_func_json_array_append::fix_length_and_dec(THD *thd)
   for (n_arg= 1; n_arg < arg_count; n_arg+= 2)
   {
     paths[n_arg/2].set_constant_flag(args[n_arg]->const_item());
-    char_length+= args[n_arg/2+1]->max_char_length() + 4;
+    char_length+=
+        static_cast<ulonglong>(args[n_arg+1]->max_char_length()) + 4;
   }
 
   fix_char_length_ulonglong(char_length);
@@ -2082,6 +2276,16 @@ err_return:
 
 static int do_merge(String *str, json_engine_t *je1, json_engine_t *je2)
 {
+
+  DBUG_EXECUTE_IF("json_check_min_stack_requirement",
+                  {
+                    long arbitrary_var;
+                    long stack_used_up= (available_stack_size(current_thd->thread_stack, &arbitrary_var));
+                    ALLOCATE_MEM_ON_STACK(my_thread_stack_size-stack_used_up-STACK_MIN_SIZE);
+                  });
+  if (check_stack_overrun(current_thd, STACK_MIN_SIZE , NULL))
+    return 1;
+
   if (json_read_value(je1) || json_read_value(je2))
     return 1;
 
@@ -2416,6 +2620,15 @@ static int copy_value_patch(String *str, json_engine_t *je)
 static int do_merge_patch(String *str, json_engine_t *je1, json_engine_t *je2,
                           bool *empty_result)
 {
+  DBUG_EXECUTE_IF("json_check_min_stack_requirement",
+                  {
+                    long arbitrary_var;
+                    long stack_used_up= (available_stack_size(current_thd->thread_stack, &arbitrary_var));
+                    ALLOCATE_MEM_ON_STACK(my_thread_stack_size-stack_used_up-STACK_MIN_SIZE);
+                  });
+  if (check_stack_overrun(current_thd, STACK_MIN_SIZE , NULL))
+    return 1;
+
   if (json_read_value(je1) || json_read_value(je2))
     return 1;
 
@@ -2619,10 +2832,8 @@ String *Item_func_json_merge_patch::val_str(String *str)
       if (json_read_value(&je2))
         goto error_return;
       if (je2.value_type == JSON_VALUE_OBJECT)
-      {
-        merge_to_null= true;
         goto cont_point;
-      }
+
       merge_to_null= false;
       str->set(js2->ptr(), js2->length(), js2->charset());
       goto cont_point;
@@ -2831,7 +3042,7 @@ longlong Item_func_json_depth::val_int()
 bool Item_func_json_type::fix_length_and_dec(THD *thd)
 {
   collation.set(&my_charset_utf8mb3_general_ci);
-  max_length= 12;
+  max_length= 12 * collation.collation->mbmaxlen;
   set_maybe_null();
   return FALSE;
 }
@@ -2897,7 +3108,8 @@ bool Item_func_json_insert::fix_length_and_dec(THD *thd)
   for (n_arg= 1; n_arg < arg_count; n_arg+= 2)
   {
     paths[n_arg/2].set_constant_flag(args[n_arg]->const_item());
-    char_length+= args[n_arg/2+1]->max_char_length() + 4;
+    char_length+=
+        static_cast<ulonglong>(args[n_arg+1]->max_char_length()) + 4;
   }
 
   fix_char_length_ulonglong(char_length);
@@ -3633,18 +3845,21 @@ String *Item_func_json_search::val_str(String *str)
   for (n_arg=4; n_arg < arg_count; n_arg++)
   {
     json_path_with_flags *c_path= paths + n_arg - 4;
+    c_path->p.types_used= JSON_PATH_KEY_NULL;
     if (!c_path->parsed)
     {
       String *s_p= args[n_arg]->val_str(tmp_paths + (n_arg-4));
-      if (s_p &&
-          json_path_setup(&c_path->p,s_p->charset(),(const uchar *) s_p->ptr(),
-                          (const uchar *) s_p->ptr() + s_p->length()))
+      if (s_p)
       {
-        report_path_error(s_p, &c_path->p, n_arg);
-        goto null_return;
+       if (json_path_setup(&c_path->p,s_p->charset(),(const uchar *) s_p->ptr(),
+                          (const uchar *) s_p->ptr() + s_p->length()))
+       {
+         report_path_error(s_p, &c_path->p, n_arg);
+         goto null_return;
+       }
+       c_path->parsed= c_path->constant;
+       has_negative_path|= c_path->p.types_used & JSON_PATH_NEGATIVE_INDEX;
       }
-      c_path->parsed= c_path->constant;
-      has_negative_path|= c_path->p.types_used & JSON_PATH_NEGATIVE_INDEX;
     }
     if (args[n_arg]->null_value)
       goto null_return;
@@ -4024,7 +4239,7 @@ bool Item_func_json_objectagg::add()
     result.append(STRING_WITH_LEN(", "));
 
   result.append('"');
-  result.append(*key);
+  st_append_escaped(&result,key);
   result.append(STRING_WITH_LEN("\":"));
 
   buf.length(0);
@@ -4172,7 +4387,7 @@ bool json_compare_arr_and_obj(json_engine_t *js, json_engine_t *value)
         return TRUE;
       *value= loc_val;
     }
-    if (!json_value_scalar(js))
+    if (js->value_type == JSON_VALUE_ARRAY)
       json_skip_level(js);
   }
   return FALSE;
@@ -4258,76 +4473,131 @@ int json_find_overlap_with_array(json_engine_t *js, json_engine_t *value,
 }
 
 
+int compare_nested_object(json_engine_t *js, json_engine_t *value)
+{
+  int result= 0;
+  const char *value_begin= (const char*)value->s.c_str-1;
+  const char *js_begin= (const char*)js->s.c_str-1;
+  json_skip_level(value);
+  json_skip_level(js);
+  const char *value_end= (const char*)value->s.c_str;
+  const char *js_end= (const char*)js->s.c_str;
+
+  String a(value_begin, value_end-value_begin,value->s.cs);
+  String b(js_begin, js_end-js_begin, js->s.cs);
+
+  DYNAMIC_STRING a_res, b_res;
+  if (init_dynamic_string(&a_res, NULL, 4096, 1024) ||
+      init_dynamic_string(&b_res, NULL, 4096, 1024))
+  { 
+    goto error;
+  }
+  if (json_normalize(&a_res, a.ptr(), a.length(), value->s.cs) ||
+      json_normalize(&b_res, b.ptr(), b.length(), value->s.cs))
+  {
+    goto error;
+  }
+
+  result= strcmp(a_res.str, b_res.str) ? 0 : 1;
+
+  error:
+  dynstr_free(&a_res);
+  dynstr_free(&b_res);
+
+  return MY_TEST(result);
+}
 int json_find_overlap_with_object(json_engine_t *js, json_engine_t *value,
                                   bool compare_whole)
 {
   if (value->value_type == JSON_VALUE_OBJECT)
   {
-    /* Find at least one common key-value pair */
-    json_string_t key_name;
-    bool found_key= false, found_value= false;
-    json_engine_t loc_js= *js;
-    const uchar *k_start, *k_end;
-
-    json_string_set_cs(&key_name, value->s.cs);
-
-    while (json_scan_next(value) == 0 && value->state == JST_KEY)
+    if (compare_whole)
     {
-      k_start= value->s.c_str;
-      do
+      return compare_nested_object(js, value);
+    }
+    else
+    {
+      /* Find at least one common key-value pair */
+      json_string_t key_name;
+      bool found_key= false, found_value= false;
+      json_engine_t loc_js= *js;
+      const uchar *k_start, *k_end;
+
+      json_string_set_cs(&key_name, value->s.cs);
+
+      while (json_scan_next(value) == 0 && value->state == JST_KEY)
       {
-        k_end= value->s.c_str;
-      } while (json_read_keyname_chr(value) == 0);
+        k_start= value->s.c_str;
+        do
+        {
+          k_end= value->s.c_str;
+        } while (json_read_keyname_chr(value) == 0);
 
-      if (unlikely(value->s.error))
-        return FALSE;
-
-      json_string_set_str(&key_name, k_start, k_end);
-      found_key= find_key_in_object(js, &key_name);
-      found_value= 0;
-
-      if (found_key)
-      {
-        if (json_read_value(js) || json_read_value(value))
+        if (unlikely(value->s.error))
           return FALSE;
 
-        /*
-          The value of key-value pair can be an be anything. If it is an object
-          then we need to compare the whole value and if it is an array then
-          we need to compare the elements in that order. So set compare_whole
-          to true.
-        */
-        if (js->value_type == value->value_type)
-          found_value= check_overlaps(js, value, true);
-        if (found_value)
+        json_string_set_str(&key_name, k_start, k_end);
+        found_key= find_key_in_object(js, &key_name);
+        found_value= 0;
+
+        if (found_key)
         {
-          if (!compare_whole)
+          if (json_read_value(js) || json_read_value(value))
+            return FALSE;
+
+          /*
+            The value of key-value pair can be an be anything. If it is an object
+            then we need to compare the whole value and if it is an array then
+            we need to compare the elements in that order. So set compare_whole
+            to true.
+          */
+          if (js->value_type == value->value_type)
+            found_value= check_overlaps(js, value, true);
+          if (found_value)
+          {
+            /*
+             We have found at least one common key-value pair now.
+             No need to check for more key-value pairs. So skip remaining
+             jsons and return TRUE.
+            */
+            json_skip_current_level(js, value);
             return TRUE;
-          *js= loc_js;
+          }
+          else
+          {
+            /*
+              Key is found but value is not found. We have already
+              exhausted both values for current key. Hence "reset"
+              only js (first argument i.e json document) and
+              continue.
+            */
+            *js= loc_js;
+            continue;
+          }
         }
         else
         {
-          if (compare_whole)
-          {
-            json_skip_current_level(js, value);
+          /*
+            key is not found. So no need to check for value for that key.
+            Read the value anyway so we get the "type" of json value.
+            If is is non-scalar then skip the entire value
+            (scalar values get exhausted while reading so no need to skip them).
+            Then reset the json doc again.
+          */
+          if (json_read_value(value))
             return FALSE;
-          }
+          if (!json_value_scalar(value))
+            json_skip_level(value);
           *js= loc_js;
         }
       }
-      else
-      {
-        if (compare_whole)
-        {
-          json_skip_current_level(js, value);
-          return FALSE;
-        }
-        json_skip_key(value);
-        *js= loc_js;
-      }
+      /*
+        At this point we have already returned true if any intersection exists.
+        So skip jsons if not exhausted and return false.
+      */
+      json_skip_current_level(js, value);
+      return FALSE;
     }
-    json_skip_current_level(js, value);
-    return compare_whole ? TRUE : FALSE;
   }
   else if (value->value_type == JSON_VALUE_ARRAY)
   {
@@ -4394,6 +4664,15 @@ int json_find_overlap_with_object(json_engine_t *js, json_engine_t *value,
 */
 int check_overlaps(json_engine_t *js, json_engine_t *value, bool compare_whole)
 {
+  DBUG_EXECUTE_IF("json_check_min_stack_requirement",
+                  {
+                    long arbitrary_var;
+                    long stack_used_up= (available_stack_size(current_thd->thread_stack, &arbitrary_var));
+                    ALLOCATE_MEM_ON_STACK(my_thread_stack_size-stack_used_up-STACK_MIN_SIZE);
+                  });
+  if (check_stack_overrun(current_thd, STACK_MIN_SIZE , NULL))
+    return 1;
+
   switch (js->value_type)
   {
   case JSON_VALUE_OBJECT:

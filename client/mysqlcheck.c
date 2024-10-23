@@ -1,6 +1,6 @@
 /*
    Copyright (c) 2001, 2013, Oracle and/or its affiliates.
-   Copyright (c) 2010, 2017, MariaDB
+   Copyright (c) 2010, 2012, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -57,16 +57,15 @@ DYNAMIC_ARRAY tables4repair, tables4rebuild, alter_table_cmds;
 DYNAMIC_ARRAY views4repair;
 static uint opt_protocol=0;
 
-static uint protocol_to_force= MYSQL_PROTOCOL_DEFAULT;
-
 enum operations { DO_CHECK=1, DO_REPAIR, DO_ANALYZE, DO_OPTIMIZE, DO_FIX_NAMES };
 const char *operation_name[]=
 {
   "???", "check", "repair", "analyze", "optimize", "fix names"
 };
 
-typedef enum { DO_VIEWS_NO, DO_VIEWS_YES, DO_VIEWS_FROM_MYSQL } enum_do_views;
-const char *do_views_opts[]= {"NO", "YES", "UPGRADE_FROM_MYSQL", NullS};
+typedef enum { DO_VIEWS_NO, DO_VIEWS_YES, DO_UPGRADE, DO_VIEWS_FROM_MYSQL } enum_do_views;
+const char *do_views_opts[]= {"NO", "YES", "UPGRADE", "UPGRADE_FROM_MYSQL",
+  NullS};
 TYPELIB do_views_typelib= { array_elements(do_views_opts) - 1, "",
     do_views_opts, NULL };
 static ulong opt_do_views= DO_VIEWS_NO;
@@ -215,8 +214,9 @@ static struct my_option my_long_options[] =
   {"process-views", 0,
    "Perform the requested operation (check or repair) on views. "
    "One of: NO, YES (correct the checksum, if necessary, add the "
-   "mariadb-version field), UPGRADE_FROM_MYSQL (same as YES and toggle "
-   "the algorithm MERGE<->TEMPTABLE.", &opt_do_views, &opt_do_views,
+   "mariadb-version field), UPGRADE (run from mariadb-upgrade), "
+   "UPGRADE_FROM_MYSQL (same as YES and toggle the algorithm "
+   "MERGE<->TEMPTABLE.", &opt_do_views, &opt_do_views,
    &do_views_typelib, GET_ENUM, OPT_ARG, 0, 0, 0, 0, 0, 0},
   {"process-tables", 0, "Perform the requested operation on tables.",
    &opt_do_tables, &opt_do_tables, 0, GET_BOOL, NO_ARG, 1, 0, 0, 0, 0, 0},
@@ -291,10 +291,6 @@ get_one_option(const struct my_option *opt,
                const char *filename)
 {
   int orig_what_to_do= what_to_do;
-
-  /* Track when protocol is set via CLI to not force overrides */
-  static my_bool ignore_protocol_override = FALSE;
-
   DBUG_ENTER("get_one_option");
 
   switch(opt->id) {
@@ -357,13 +353,6 @@ get_one_option(const struct my_option *opt,
   case 'W':
 #ifdef _WIN32
     opt_protocol = MYSQL_PROTOCOL_PIPE;
-
-    /* Prioritize pipe if explicit via command line */
-    if (filename[0] == '\0')
-    {
-      ignore_protocol_override = TRUE;
-      protocol_to_force = MYSQL_PROTOCOL_DEFAULT;
-    }
 #endif
     break;
   case '#':
@@ -387,45 +376,26 @@ get_one_option(const struct my_option *opt,
       sf_leaking_memory= 1; /* no memory leak reports here */
       exit(1);
     }
-
-    /* Specification of protocol via CLI trumps implicit overrides */
-    if (filename[0] == '\0')
-    {
-      ignore_protocol_override = TRUE;
-      protocol_to_force = MYSQL_PROTOCOL_DEFAULT;
-    }
-
     break;
   case 'P':
-    /* If port and socket are set, fall back to default behavior */
-    if (protocol_to_force == SOCKET_PROTOCOL_TO_FORCE)
+    if (filename[0] == '\0')
     {
-      ignore_protocol_override = TRUE;
-      protocol_to_force = MYSQL_PROTOCOL_DEFAULT;
-    }
-
-    /* If port is set via CLI, try to force protocol to TCP */
-    if (filename[0] == '\0' &&
-        !ignore_protocol_override &&
-        protocol_to_force == MYSQL_PROTOCOL_DEFAULT)
-    {
-      protocol_to_force = MYSQL_PROTOCOL_TCP;
+      /* Port given on command line, switch protocol to use TCP */
+      opt_protocol= MYSQL_PROTOCOL_TCP;
     }
     break;
   case 'S':
-    /* If port and socket are set, fall back to default behavior */
-    if (protocol_to_force == MYSQL_PROTOCOL_TCP)
+    if (filename[0] == '\0')
     {
-      ignore_protocol_override = TRUE;
-      protocol_to_force = MYSQL_PROTOCOL_DEFAULT;
-    }
-
-    /* Prioritize socket if set via command line */
-    if (filename[0] == '\0' &&
-        !ignore_protocol_override &&
-        protocol_to_force == MYSQL_PROTOCOL_DEFAULT)
-    {
-      protocol_to_force = SOCKET_PROTOCOL_TO_FORCE;
+      /*
+        Socket given on command line, switch protocol to use SOCKETSt
+        Except on Windows if 'protocol= pipe' has been provided in
+        the config file or command line.
+      */
+      if (opt_protocol != MYSQL_PROTOCOL_PIPE)
+      {
+        opt_protocol= MYSQL_PROTOCOL_SOCKET;
+      }
     }
     break;
   }
@@ -519,7 +489,7 @@ static int get_options(int *argc, char ***argv)
     DBUG_RETURN(1);
   }
   if (tty_password)
-    opt_password = get_tty_password(NullS);
+    opt_password = my_get_tty_password(NullS);
   if (debug_info_flag)
     my_end_arg= MY_CHECK_ERROR | MY_GIVE_INFO;
   if (debug_check_flag)
@@ -962,7 +932,10 @@ static int handle_request_for_tables(char *tables, size_t length,
     op= opt_write_binlog ?  "REPAIR" : "REPAIR NO_WRITE_TO_BINLOG";
     if (view)
     {
-      if (opt_do_views == DO_VIEWS_FROM_MYSQL) end = strmov(end, " FROM MYSQL");
+      if (opt_do_views == DO_VIEWS_FROM_MYSQL)
+        end = strmov(end, " FROM MYSQL");
+      else if (opt_do_views == DO_UPGRADE)
+        end = strmov(end, " FOR UPGRADE");
     }
     else
     {
@@ -974,7 +947,7 @@ static int handle_request_for_tables(char *tables, size_t length,
   case DO_ANALYZE:
     if (view)
     {
-      printf("%-50s %s\n", tables, "Can't run anaylyze on a view");
+      printf("%-50s %s\n", tables, "Can't run analyze on a view");
       DBUG_RETURN(1);
     }
     DBUG_ASSERT(!view);
@@ -1002,6 +975,7 @@ static int handle_request_for_tables(char *tables, size_t length,
     DBUG_RETURN(1);
   if (dont_quote)
   {
+    DBUG_ASSERT(op);
     DBUG_ASSERT(strlen(op)+strlen(tables)+strlen(options)+8+1 <= query_size);
 
     /* No backticks here as we added them before */
@@ -1061,7 +1035,6 @@ static void print_result()
   char prev[(NAME_LEN+9)*3+2];
   char prev_alter[MAX_ALTER_STR_SIZE];
   size_t length_of_db= strlen(sock->db);
-  uint i;
   my_bool found_error=0, table_rebuild=0;
   DYNAMIC_ARRAY *array4repair= &tables4repair;
   DBUG_ENTER("print_result");
@@ -1070,7 +1043,7 @@ static void print_result()
 
   prev[0] = '\0';
   prev_alter[0]= 0;
-  for (i = 0; (row = mysql_fetch_row(res)); i++)
+  while ((row = mysql_fetch_row(res)))
   {
     int changed = strcmp(prev, row[0]);
     my_bool status = !strcmp(row[2], "status");
@@ -1166,7 +1139,10 @@ static int dbConnect(char *host, char *user, char *passwd)
 		  opt_ssl_capath, opt_ssl_cipher);
     mysql_options(&mysql_connection, MYSQL_OPT_SSL_CRL, opt_ssl_crl);
     mysql_options(&mysql_connection, MYSQL_OPT_SSL_CRLPATH, opt_ssl_crlpath);
+    mysql_options(&mysql_connection, MARIADB_OPT_TLS_VERSION, opt_tls_version);
   }
+  mysql_options(&mysql_connection, MYSQL_OPT_SSL_VERIFY_SERVER_CERT,
+                (char*)&opt_ssl_verify_server_cert);
 #endif
   if (opt_protocol)
     mysql_options(&mysql_connection,MYSQL_OPT_PROTOCOL,(char*)&opt_protocol);
@@ -1245,14 +1221,6 @@ int main(int argc, char **argv)
   defaults_argv= argv;
   if (get_options(&argc, &argv))
     goto end1;
-
-
-  /* Command line options override configured protocol */
-  if (protocol_to_force > MYSQL_PROTOCOL_DEFAULT
-      && protocol_to_force != opt_protocol)
-  {
-    warn_protocol_override(current_host, &opt_protocol, protocol_to_force);
-  }
 
   sf_leaking_memory=0; /* from now on we cleanup properly */
 

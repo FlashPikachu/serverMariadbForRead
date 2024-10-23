@@ -65,6 +65,9 @@
 #include "semisync_master.h"
 #include "semisync_slave.h"
 #include <ssl_compat.h>
+#ifdef WITH_WSREP
+#include "wsrep_mysqld.h"
+#endif
 
 #define PCRE2_STATIC 1             /* Important on Windows */
 #include "pcre2.h"                 /* pcre2 header file */
@@ -599,10 +602,9 @@ bool check_has_super(sys_var *self, THD *thd, set_var *var)
   return false;
 }
 
-static Sys_var_bit Sys_core_file("core_file", "write a core-file on crashes",
-          READ_ONLY GLOBAL_VAR(test_flags), NO_CMD_LINE,
-          TEST_CORE_ON_SIGNAL, DEFAULT(IF_WIN(TRUE,FALSE)), NO_MUTEX_GUARD, NOT_IN_BINLOG,
-          0,0,0);
+static Sys_var_bit Sys_core_file("core_file", "Write core on crashes",
+          READ_ONLY GLOBAL_VAR(test_flags), CMD_LINE(OPT_ARG),
+          TEST_CORE_ON_SIGNAL, DEFAULT(IF_WIN(TRUE,FALSE)));
 
 static bool binlog_format_check(sys_var *self, THD *thd, set_var *var)
 {
@@ -719,15 +721,13 @@ Sys_binlog_direct(
        CMD_LINE(OPT_ARG), DEFAULT(FALSE),
        NO_MUTEX_GUARD, NOT_IN_BINLOG, ON_CHECK(binlog_direct_check));
 
-
-static Sys_var_mybool Sys_explicit_defaults_for_timestamp(
+static Sys_var_bit Sys_explicit_defaults_for_timestamp(
        "explicit_defaults_for_timestamp",
        "This option causes CREATE TABLE to create all TIMESTAMP columns "
        "as NULL with DEFAULT NULL attribute, Without this option, "
        "TIMESTAMP columns are NOT NULL and have implicit DEFAULT clauses.",
-       READ_ONLY GLOBAL_VAR(opt_explicit_defaults_for_timestamp),
-       CMD_LINE(OPT_ARG), DEFAULT(FALSE));
-
+       SESSION_VAR(option_bits), CMD_LINE(OPT_ARG),
+       OPTION_EXPLICIT_DEF_TIMESTAMP, DEFAULT(FALSE), NO_MUTEX_GUARD, IN_BINLOG);
 
 static Sys_var_ulonglong Sys_bulk_insert_buff_size(
        "bulk_insert_buffer_size", "Size of tree cache used in bulk "
@@ -789,11 +789,27 @@ static bool check_charset(sys_var *self, THD *thd, set_var *var)
   else // INT_RESULT
   {
     int csno= (int)var->value->val_int();
-    if (!(var->save_result.ptr= get_charset(csno, MYF(0))))
+    CHARSET_INFO *cs;
+    if ((var->save_result.ptr= cs= get_charset(csno, MYF(0))))
     {
-      my_error(ER_UNKNOWN_CHARACTER_SET, MYF(0), llstr(csno, buff));
-      return true;
+      /*
+        Backward compatibility: pre MDEV-30824 servers
+        can write non-default collation IDs to binary log:
+          SET character_set_client=83; -- utf8mb3_bin
+        Convert a non-default collation to the compiled default collation,
+        e.g. utf8mb3_bin to utf8mb3_general_ci, but only if
+        - THD is a slave thread or
+        - is processing a mysqlbinlog output.
+      */
+      if ((cs->state & MY_CS_PRIMARY) ||
+          ((thd->variables.pseudo_slave_mode || thd->slave_thread) &&
+           (var->save_result.ptr=
+             Lex_exact_charset_opt_extended_collate(cs, true).
+               find_default_collation())))
+        return false;
     }
+    my_error(ER_UNKNOWN_CHARACTER_SET, MYF(0), llstr(csno, buff));
+    return true;
   }
   return false;
 }
@@ -1850,6 +1866,13 @@ Sys_gtid_domain_id(
        ON_CHECK(check_gtid_domain_id));
 
 
+/*
+  Check that setting gtid_seq_no isn't done inside a transaction, and (in
+  gtid_strict_mode) doesn't create an out-of-order GTID sequence.
+
+  Setting gtid_seq_no to DEFAULT or 0 means we 'reset' it so that the value
+  doesn't affect the GTID of the next event group written to the binlog.
+*/
 static bool check_gtid_seq_no(sys_var *self, THD *thd, set_var *var)
 {
   uint32 domain_id, server_id;
@@ -1860,13 +1883,16 @@ static bool check_gtid_seq_no(sys_var *self, THD *thd, set_var *var)
                                                  ER_INSIDE_TRANSACTION_PREVENTS_SWITCH_GTID_DOMAIN_ID_SEQ_NO)))
     return true;
 
-  domain_id= thd->variables.gtid_domain_id;
-  server_id= thd->variables.server_id;
-  seq_no= (uint64)var->value->val_uint();
-  DBUG_EXECUTE_IF("ignore_set_gtid_seq_no_check", return 0;);
-  if (opt_gtid_strict_mode && opt_bin_log &&
-      mysql_bin_log.check_strict_gtid_sequence(domain_id, server_id, seq_no))
-    return true;
+  DBUG_EXECUTE_IF("ignore_set_gtid_seq_no_check", return false;);
+  if (var->value && opt_gtid_strict_mode && opt_bin_log)
+  {
+    domain_id= thd->variables.gtid_domain_id;
+    server_id= thd->variables.server_id;
+    seq_no= (uint64)var->value->val_uint();
+    if (seq_no != 0 &&
+        mysql_bin_log.check_strict_gtid_sequence(domain_id, server_id, seq_no))
+      return true;
+  }
 
   return false;
 }
@@ -2047,7 +2073,10 @@ Sys_gtid_strict_mode(
        "gtid_strict_mode",
        "Enforce strict seq_no ordering of events in the binary log. Slave "
        "stops with an error if it encounters an event that would cause it to "
-       "generate an out-of-order binlog if executed.",
+       "generate an out-of-order binlog if executed. "
+       "When ON the same server-id semisync-replicated transactions that "
+       "duplicate exising ones in binlog are ignored without error "
+       "and slave interruption.",
        GLOBAL_VAR(opt_gtid_strict_mode),
        CMD_LINE(OPT_ARG), DEFAULT(FALSE));
 
@@ -2795,6 +2824,7 @@ export const char *optimizer_switch_names[]=
   "rowid_filter",
   "condition_pushdown_from_having",
   "not_null_range_scan",
+  "hash_join_cardinality",
   "default", 
   NullS
 };
@@ -3057,7 +3087,7 @@ static Sys_var_mybool Sys_skip_name_resolve(
        "skip_name_resolve",
        "Don't resolve hostnames. All hostnames are IP's or 'localhost'.",
        READ_ONLY GLOBAL_VAR(opt_skip_name_resolve),
-       CMD_LINE(OPT_ARG, OPT_SKIP_RESOLVE),
+       CMD_LINE(OPT_ARG),
        DEFAULT(FALSE));
 
 static Sys_var_mybool Sys_skip_show_database(
@@ -4441,7 +4471,7 @@ static bool fix_autocommit(sys_var *self, THD *thd, enum_var_type type)
       transaction implicitly at the end (@sa stmt_causes_implicitcommit()).
     */
     thd->variables.option_bits&=
-                 ~(OPTION_BEGIN | OPTION_KEEP_LOG | OPTION_NOT_AUTOCOMMIT |
+                 ~(OPTION_BEGIN | OPTION_BINLOG_THIS_TRX | OPTION_NOT_AUTOCOMMIT |
                    OPTION_GTID_BEGIN);
     thd->transaction->all.modified_non_trans_table= false;
     thd->transaction->all.m_unsafe_rollback_flags&= ~THD_TRANS::DID_WAIT;
@@ -4511,10 +4541,7 @@ static bool fix_sql_log_bin_after_update(sys_var *self, THD *thd,
 {
   DBUG_ASSERT(type == OPT_SESSION);
 
-  if (thd->variables.sql_log_bin)
-    thd->variables.option_bits |= OPTION_BIN_LOG;
-  else
-    thd->variables.option_bits &= ~OPTION_BIN_LOG;
+  thd->set_binlog_bit();
 
   return FALSE;
 }
@@ -5419,7 +5446,6 @@ Sys_var_rpl_filter::global_value_ptr(THD *thd,
   }
 
   rpl_filter= mi->rpl_filter;
-  tmp.length(0);
 
   mysql_mutex_lock(&LOCK_active_mi);
   switch (opt_id) {
@@ -5891,7 +5917,7 @@ static bool update_wsrep_auto_increment_control (sys_var *self, THD *thd, enum_v
   {
     /*
       The variables that control auto increment shall be calculated
-      automaticaly based on the size of the cluster. This usually done
+      automatically based on the size of the cluster. This usually done
       within the wsrep_view_handler_cb callback. However, if the user
       manually sets the value of wsrep_auto_increment_control to 'ON',
       then we should to re-calculate these variables again (because
@@ -6062,6 +6088,7 @@ static const char *wsrep_mode_names[]=
   "REPLICATE_MYISAM",
   "REPLICATE_ARIA",
   "DISALLOW_LOCAL_GTID",
+  "BF_ABORT_MARIABACKUP",
   NullS
 };
 static Sys_var_set Sys_wsrep_mode(
@@ -6460,8 +6487,9 @@ static Sys_var_ulong Sys_log_slow_rate_limit(
        SESSION_VAR(log_slow_rate_limit), CMD_LINE(REQUIRED_ARG),
        VALID_RANGE(1, UINT_MAX), DEFAULT(1), BLOCK_SIZE(1));
 
-static const char *log_slow_verbosity_names[]= { "innodb", "query_plan", 
-                                                 "explain", 0 };
+static const char *log_slow_verbosity_names[]=
+{ "innodb", "query_plan", "explain", "engine", "full", 0};
+
 static Sys_var_set Sys_log_slow_verbosity(
        "log_slow_verbosity",
        "Verbosity level for the slow log",
