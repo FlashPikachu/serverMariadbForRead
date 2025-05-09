@@ -1018,6 +1018,26 @@ contains_all_slave_gtid(slave_connection_state *st, Gtid_list_log_event *glev)
   for (i= 0; i < glev->count; ++i)
   {
     uint32 gl_domain_id= glev->list[i].domain_id;
+
+    /***
+    slave_connection_state::entry *
+    slave_connection_state::find_entry(uint32 domain_id)
+    {
+      return (entry *) my_hash_search(&hash, (const uchar *)(&domain_id),
+                                      sizeof(domain_id));
+    }
+
+
+    rpl_gtid *
+    slave_connection_state::find(uint32 domain_id)
+    {
+      entry *e= find_entry(domain_id);
+      if (!e)
+        return NULL;
+      return &e->gtid;
+    }
+     */
+     // find 是rpl_gtid的成员函数
     const rpl_gtid *gtid= st->find(gl_domain_id);
     if (!gtid)
     {
@@ -1048,6 +1068,11 @@ contains_all_slave_gtid(slave_connection_state *st, Gtid_list_log_event *glev)
         beginning of this group, per the special case explained in comment at
         the start of this function. If not, then we need to search back further.
       */
+      /*
+       假设从库希望从 GTID D-S-N1 开始复制。主库当前 binlog 文件中 Gtid_list_event 的最后一个记录是 D-S-N1。
+       也就是说，从库想从 D-S-N1 开始，而这个 GTID 恰好是前一个 binlog 文件中这个 domain 的“最后一个事务”。
+       根据 MariaDB 的设计，这是个合法的特殊情况，从库可以从当前 binlog 文件的开头开始复制，不必回滚到上一个 binlog 去找这个 GTID。
+       */
       if (i+1 < glev->count && gl_domain_id == glev->list[i+1].domain_id)
         return false;
     }
@@ -1305,6 +1330,20 @@ static const char *
 gtid_find_binlog_file(slave_connection_state *state, char *out_name,
                       slave_connection_state *until_gtid_state)
 {
+    for (uint i = 0; i < state->hash.records; ++i) {
+    // 获取 hash 表中的 entry 指针
+    slave_connection_state::entry *e =
+      (slave_connection_state::entry *)my_hash_element(&state->hash, i);
+
+    // 输出 entry 的 GTID 信息
+    sql_print_information("Slave request gtid:");
+    sql_print_information("Domain ID: %u, Server ID: %u, Sequence Number: %llu, Flags: %u\n",
+           e->gtid.domain_id,
+           e->gtid.server_id,
+           e->gtid.seq_no,
+           e->flags);
+  }
+
   MEM_ROOT memroot;
   binlog_file_entry *list;
   Gtid_list_log_event *glev= NULL;
@@ -1322,6 +1361,7 @@ gtid_find_binlog_file(slave_connection_state *state, char *out_name,
 
   while (list)
   {
+    sql_print_information("gtid_find_binlog_file: %s", list->name.str);
     File file;
     IO_CACHE cache;
 
@@ -1348,6 +1388,9 @@ gtid_find_binlog_file(slave_connection_state *state, char *out_name,
     bzero((char*) &cache, sizeof(cache));
     if (unlikely((file= open_binlog(&cache, buf, &errormsg)) == (File)-1))
       goto end;
+    /**
+     * 查找binlog开头的gtid_list
+     */
     errormsg= get_gtid_list_event(&cache, &glev);
     end_io_cache(&cache);
     mysql_file_close(file, MYF(MY_WME));
@@ -2107,7 +2150,9 @@ err:
   mysql_file_close(file, MYF(MY_WME));
   return info->error;
 }
-
+/**
+ * 当slave过来请求的时候，master处理slave的请求
+ */
 static int init_binlog_sender(binlog_send_info *info,
                               LOG_INFO *linfo,
                               const char *log_ident,
@@ -2135,6 +2180,9 @@ static int init_binlog_sender(binlog_send_info *info,
   DBUG_EXECUTE_IF("simulate_non_gtid_aware_master",
                   info->using_gtid_state= false;);
 
+  /**
+   * 如果启用了GTID状态，则设置从库的GTID严格模式和忽略重复GTID选项；若设置了slave_until_gtid，则启用对应的GTID截止状态。
+   */
   if (info->using_gtid_state)
   {
     info->slave_gtid_strict_mode= get_slave_gtid_strict_mode(thd);
@@ -2179,6 +2227,11 @@ static int init_binlog_sender(binlog_send_info *info,
   const char *name=search_file_name;
   if (info->using_gtid_state)
   {
+      /**
+       * 调用gtid_state.load()尝试加载GTID状态数据
+            如果返回true（表示内存不足或请求格式错误），则设置错误信息和错误码
+            然后返回1，表示操作失败
+       */
     if (info->gtid_state.load(connect_gtid_state.ptr(),
                              connect_gtid_state.length()))
     {
@@ -2187,6 +2240,9 @@ static int init_binlog_sender(binlog_send_info *info,
       info->error= ER_UNKNOWN_ERROR;
       return 1;
     }
+    /**
+     * GTID 截止位置：当从库使用 START SLAVE UNTIL 命令并指定了某个 GTID 位置时，until_gtid_state 会记录这个 GTID 位置。
+     */
     if (info->until_gtid_state &&
         info->until_gtid_state->load(slave_until_gtid_str.ptr(),
                                     slave_until_gtid_str.length()))
@@ -2202,6 +2258,10 @@ static int init_binlog_sender(binlog_send_info *info,
       info->error= error;
       return 1;
     }
+    /**
+     * 这一步出错都会返回1236错误，即ER_MASTER_FATAL_ERROR_READING_BINLOG
+     */
+    sql_print_information("Start find slave gtid binlog file!");
     if ((info->errmsg= gtid_find_binlog_file(&info->gtid_state,
                                              search_file_name,
                                              info->until_gtid_state)))

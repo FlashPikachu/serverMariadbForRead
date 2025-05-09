@@ -1196,7 +1196,21 @@ extern const char *log_bin_basename;
 
   @returns true if a problem occurs, false otherwise.
  */
+/*
+情况 1：from 是相对路径
+    opt_bin_logname = "/var/log/mysql/binlog"（配置的 binlog 路径）
+    from = "binlog.000001"（相对路径）
 
+处理后：
+    log_dirpart = "/var/log/mysql/"
+    from + log_dirname_len = "binlog.000001"（因为 log_dirname_len = 0）
+    buff = "/var/log/mysql/binlog.000001"
+    最终 to = "/var/log/mysql/binlog.000001"
+
+情况 2：from 是绝对路径
+    from = "/custom/mysql/binlog.000001"
+    test_if_hard_path(from) == true → 直接使用 from，不做处理。
+ */
 inline bool normalize_binlog_name(char *to, const char *from, bool is_relay_log)
 {
   DBUG_ENTER("normalize_binlog_name");

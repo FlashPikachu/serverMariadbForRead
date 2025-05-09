@@ -12009,7 +12009,19 @@ get_gtid_list_event(IO_CACHE *cache, Gtid_list_log_event **out_gtid_list)
     }
     typ= ev->get_type_code();
     if (typ == GTID_LIST_EVENT)
-      break;                                    /* Done, found it */
+    {
+              // 打印GTID列表信息
+      Gtid_list_log_event *gtid_event = static_cast<Gtid_list_log_event *>(ev);
+      fprintf(stderr, "Found GTID_LIST_EVENT with %u GTIDs:\n", gtid_event->count);
+      for (uint32 i = 0; i < gtid_event->count; ++i)
+      {
+        fprintf(stderr, "  DomainID:%u ServerID:%u Sequence:%llu\n",
+                gtid_event->list[i].domain_id,
+                gtid_event->list[i].server_id,
+                gtid_event->list[i].seq_no);
+      }
+      break;/* Done, found it */
+    }
     if (typ == START_ENCRYPTION_EVENT)
     {
       if (fdle->start_decryption((Start_encryption_log_event*) ev))
