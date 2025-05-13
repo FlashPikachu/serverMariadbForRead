@@ -1399,9 +1399,9 @@ gtid_find_binlog_file(slave_connection_state *state, char *out_name,
 
     if (!glev || contains_all_slave_gtid(state, glev))
     {
-      strmake(out_name, buf, FN_REFLEN);
+      strmake(out_name, buf, FN_REFLEN); // 将当前找到的 binlog 文件名（buf）复制到函数调用者提供的输出参数 out_name 中，也就是可以返回给外部调用者
 
-      if (glev)
+      if (glev) // 如果glev是null，意味着该binlog的gtid_list为空，返回该binlog
       {
         uint32 i;
 
@@ -1439,9 +1439,9 @@ gtid_find_binlog_file(slave_connection_state *state, char *out_name,
               domain in this binlog file. So delete the entry from the state,
               we do not need to skip anything.
             */
-            state->remove(gtid);
+            state->remove(gtid); //这一步不是很理解，可能是因为gtid_slave_pos的这个domain的seq刚好是gtid_list上面的 后续复制无需跳过任何这个domain的事务？需要看其他地方的代码
           }
-
+          // START REPLICA UNTIL (SQL_BEFORE_GTIDS|SQL_AFTER_GTIDS)="<gtid_list>" 看起来是这个用法，没有使用过，后面可以测试下
           if (until_gtid_state &&
               (gtid= until_gtid_state->find(glev->list[i].domain_id)) &&
               gtid->server_id == glev->list[i].server_id &&
@@ -1757,6 +1757,7 @@ is_until_reached(binlog_send_info *info, ulong *ev_offset,
   connection.
 
   Returns NULL on success, error message string on error.
+  这个方法里面会去除小于gtid_slave_pos的事件后再发送
 */
 static const char *
 send_event_to_slave(binlog_send_info *info, Log_event_type event_type,
@@ -1770,6 +1771,27 @@ send_event_to_slave(binlog_send_info *info, Log_event_type event_type,
   slave_connection_state *gtid_state= &info->gtid_state;
   slave_connection_state *until_gtid_state= info->until_gtid_state;
   bool need_sync= false;
+
+  const char *event_type_s = Log_event::get_type_str(event_type);
+    if (event_type == GTID_EVENT && info->using_gtid_state)
+  {
+    rpl_gtid event_gtid;
+    uchar flags2;
+    if (!Gtid_log_event::peek((uchar*) packet->ptr() + ev_offset,
+                              len - ev_offset,
+                              current_checksum_alg,
+                              &event_gtid.domain_id,
+                              &event_gtid.server_id,
+                              &event_gtid.seq_no,
+                              &flags2,
+                              info->fdev))
+    {
+      // 使用 DBUG_PRINT 记录 GTID 信息
+      sql_print_information("Read GTID_EVENT: type=%s, %u-%u-%llu, packet_len=%zu",
+                            event_type_s, event_gtid.domain_id,
+                            event_gtid.server_id, event_gtid.seq_no, len);
+    }
+  }
 
   if (event_type == GTID_LIST_EVENT &&
       info->using_gtid_state && until_gtid_state)
@@ -1835,6 +1857,9 @@ send_event_to_slave(binlog_send_info *info, Log_event_type event_type,
         return "Failed in internal GTID book-keeping: Out of memory";
       }
 
+      /*
+       * 这里可能是跳过的逻辑
+       */
       if (gtid_state->count() > 0)
       {
         gtid_entry= gtid_state->find_entry(event_gtid.domain_id);
@@ -2087,6 +2112,30 @@ send_event_to_slave(binlog_send_info *info, Log_event_type event_type,
     return "run 'before_send_event' hook failed";
   }
 
+    // 记录事件类型
+  const char *event_type_str = Log_event::get_type_str(event_type);
+
+  // 如果是 GTID_EVENT，提取 GTID 信息
+  if (event_type == GTID_EVENT && info->using_gtid_state)
+  {
+    rpl_gtid event_gtid;
+    uchar flags2;
+    if (!Gtid_log_event::peek((uchar*) packet->ptr() + ev_offset,
+                              len - ev_offset,
+                              current_checksum_alg,
+                              &event_gtid.domain_id,
+                              &event_gtid.server_id,
+                              &event_gtid.seq_no,
+                              &flags2,
+                              info->fdev))
+    {
+      // 使用 DBUG_PRINT 记录 GTID 信息
+      sql_print_information("Sending GTID_EVENT: type=%s, domain_id=%u, server_id=%u, seq_no=%llu, packet_len=%zu",
+                            event_type_str, event_gtid.domain_id,
+                            event_gtid.server_id, event_gtid.seq_no, len);
+    }
+  }
+
   if (my_net_write(info->net, (uchar*) packet->ptr(), len))
   {
     info->error= ER_UNKNOWN_ERROR;
@@ -2259,7 +2308,8 @@ static int init_binlog_sender(binlog_send_info *info,
       return 1;
     }
     /**
-     * 这一步出错都会返回1236错误，即ER_MASTER_FATAL_ERROR_READING_BINLOG
+     * 下面这一步出错都会返回1236错误，即ER_MASTER_FATAL_ERROR_READING_BINLOG
+     * 如果 gtid_find_binlog_file() 返回 NULL（成功），则 info->errmsg 被赋值为 NULL，整个条件为 false，不会进入 if 块。
      */
     sql_print_information("Start find slave gtid binlog file!");
     if ((info->errmsg= gtid_find_binlog_file(&info->gtid_state,
@@ -2281,7 +2331,8 @@ static int init_binlog_sender(binlog_send_info *info,
       name=0; // Find first log
   }
   linfo->index_file_offset= 0;
-
+    // 这里name是指向search_file_name的指针，所以前面找到的binlog文件名会赋值给name
+    // 在binlog index中找目标binlog的偏移量
   if (mysql_bin_log.find_log_pos(linfo, name, 1))
   {
     info->errmsg= "Could not find first log file name in binary "
