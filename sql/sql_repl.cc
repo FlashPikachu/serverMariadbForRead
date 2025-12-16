@@ -1014,7 +1014,7 @@ static bool
 contains_all_slave_gtid(slave_connection_state *st, Gtid_list_log_event *glev)
 {
   uint32 i;
-
+//  这里遍历的是gtid_list
   for (i= 0; i < glev->count; ++i)
   {
     uint32 gl_domain_id= glev->list[i].domain_id;
