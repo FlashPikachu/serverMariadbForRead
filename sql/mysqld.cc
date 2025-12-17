@@ -5052,17 +5052,27 @@ static int init_server_components()
 #endif
 
 #ifdef WITH_WSREP
+//  galera集群启动
   if (wsrep_init_server()) unireg_abort(1);
 
   if (WSREP_ON && !wsrep_recovery && !opt_abort)
   {
     if (opt_bootstrap) // bootsrap option given - disable wsrep functionality
     {
+        //    不要求 Primary
+        //    不要求 quorum
+        //    不要求 view 一致
+        //    人为声明：这是权威起点
       wsrep_provider_init(WSREP_NONE);
       if (wsrep_init())
         unireg_abort(1);
+/**
+        MariaDB 无条件信任配置
+        wsrep_gtid_domain_id = 你配置的值
+        不做任何一致性校验
+**/
     }
-    else // full wsrep initialization
+    else // full wsrep initialization 这是 绝大多数正常启动 / crash 重启 / 节点 join 走的路径。
     {
       // add basedir/bin to PATH to resolve wsrep script names
       size_t tmp_path_size= strlen(mysql_home) + 5; /* including "/bin" */
@@ -5070,7 +5080,7 @@ static int init_server_components()
       if (tmp_path)
       {
         snprintf(tmp_path, tmp_path_size, "%s/bin", mysql_home);
-        wsrep_prepend_PATH(tmp_path);
+        wsrep_prepend_PATH(tmp_path); // 为 SST / IST / wsrep 脚本准备环境
       }
       else
       {
@@ -5078,7 +5088,7 @@ static int init_server_components()
       }
       my_afree(tmp_path);
 
-      if (wsrep_before_SE())
+      if (wsrep_before_SE()) // wsrep provider 开始 attach；开始判断：view Primary / Non-Primary seqno state UUID
       {
         set_ports(); // this is also called in network_init() later but we need
                      // to know mysqld_port now - lp:1071882
@@ -5430,6 +5440,7 @@ static int init_server_components()
     {
       time_t purge_time= server_start_time - binlog_expire_logs_seconds;
       if (purge_time >= 0)
+          // 启动前清除binlog
         mysql_bin_log.purge_logs_before_date(purge_time);
     }
   }
@@ -5532,7 +5543,7 @@ static void test_lc_time_sz()
 }
 #endif//DBUG_OFF
 
-
+#include "wsrep_xid.h"
 int mysqld_main(int argc, char **argv)
 {
 #ifndef _WIN32
@@ -5778,6 +5789,8 @@ int mysqld_main(int argc, char **argv)
   network_init();
 
 #ifdef WITH_WSREP
+
+
   // Recover and exit.
   if (wsrep_recovery)
   {
@@ -5788,6 +5801,10 @@ int mysqld_main(int argc, char **argv)
       sql_print_information("WSREP: disabled, skipping position recovery");
     unireg_abort(0);
   }
+
+//  wsrep_server_gtid_t server_gtid=  wsrep_get_SE_checkpoint<wsrep_server_gtid_t>();
+//  WSREP_ERROR("TLOG: domain_id-server_id: %d-%d", server_gtid.domain_id,
+//                server_gtid.server_id);
 #endif
 
   /*

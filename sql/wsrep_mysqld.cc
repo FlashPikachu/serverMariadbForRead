@@ -56,6 +56,8 @@
 
 #include <sstream>
 
+
+
 /* wsrep-lib */
 Wsrep_server_state* Wsrep_server_state::m_instance;
 
@@ -962,6 +964,7 @@ void wsrep_thr_init()
 
 void wsrep_init_startup (bool sst_first)
 {
+    // 初始化wsrep
   if (wsrep_init()) unireg_abort(1);
 
   /*
@@ -1088,7 +1091,7 @@ void wsrep_recover()
       local_seqno == -2)
   {
     wsrep_uuid_print(&local_uuid, uuid_str, sizeof(uuid_str));
-    WSREP_INFO("Position %s:%lld given at startup, skipping position recovery",
+    WSREP_ERROR("Position %s:%lld given at startup, skipping position recovery",
                uuid_str, (long long)local_seqno);
     return;
   }
@@ -1098,12 +1101,12 @@ void wsrep_recover()
   if (wsrep_gtid_mode)
   {
     wsrep_server_gtid_t server_gtid=  wsrep_get_SE_checkpoint<wsrep_server_gtid_t>();
-    WSREP_INFO("Recovered position: %s,%d-%d-%llu", oss.str().c_str(), server_gtid.domain_id,
+    WSREP_ERROR("Recovered position: %s,%d-%d-%llu", oss.str().c_str(), server_gtid.domain_id,
                 server_gtid.server_id, server_gtid.seqno);
   }
   else
   {
-    WSREP_INFO("Recovered position: %s", oss.str().c_str());
+    WSREP_ERROR("Recovered position: %s", oss.str().c_str());
   }
 }
 
